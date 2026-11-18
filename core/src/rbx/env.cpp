@@ -91,6 +91,16 @@ int identifyexecutor(lua_State* L) {
     return 2;
 }
 
+int getnamecallmethod(lua_State* L) {
+    const char* method = lua_namecallatom(L, nullptr);
+    if (method) {
+        lua_pushstring(L, method);
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
 int getgenv(lua_State* L) {
     lua_State* owner = executor::thread();
     if (!owner || owner == L || owner->global != L->global) {
@@ -4036,6 +4046,40 @@ http = {
     Request = do_request,
     http_request = do_request,
 }
+
+-- Instance methods are resolved through the DataModel's metatable. Give the
+-- game userdata a private clone so HttpGet/HttpPost work with method syntax
+-- without changing the shared instance metatable that every other object uses.
+do
+    local mt = getrawmetatable(game)
+    if type(mt) == "table" and not rawget(mt, "__zend_game_methods") then
+        local old_index = mt.__index
+        local old_namecall = mt.__namecall
+        local clone = {}
+        for key, value in pairs(mt) do
+            clone[key] = value
+        end
+        clone.__zend_game_methods = true
+        clone.__index = function(self, key)
+            if key == "HttpGet" or key == "HttpGetAsync" then
+                return HttpGet
+            elseif key == "HttpPost" or key == "HttpPostAsync" then
+                return HttpPost
+            end
+            return old_index(self, key)
+        end
+        clone.__namecall = function(self, ...)
+            local method = getnamecallmethod()
+            if method == "HttpGet" or method == "HttpGetAsync" then
+                return HttpGet(...)
+            elseif method == "HttpPost" or method == "HttpPostAsync" then
+                return HttpPost(...)
+            end
+            return old_namecall(self, ...)
+        end
+        setrawmetatable(game, clone)
+    end
+end
 )LUA";
 
 void install_http(lua_State* L) {
@@ -4328,6 +4372,7 @@ void install(lua_State* L) {
     set_function(L, "setidentity", setthreadidentity);
     set_function(L, "setthreadcontext", setthreadidentity);
     set_function(L, "getcapabilities", getcapabilities);
+    set_function(L, "getnamecallmethod", getnamecallmethod);
 
     set_function(L, "getchildren", instance_getchildren);
     set_function(L, "getdescendants", instance_getdescendants);
@@ -4338,7 +4383,6 @@ void install(lua_State* L) {
 
     install_filesystem(L);
     install_crypt(L);
-    install_http(L);
     install_console(L);
     install_signals(L);
 
@@ -4349,6 +4393,10 @@ void install(lua_State* L) {
     set_function(L, "setreadonly", setreadonly);
     set_function(L, "isreadonly", isreadonly);
     set_function(L, "make_writeable", make_writeable);
+
+    // Runs last: the prelude installs the DataModel's HttpGet/HttpPost methods
+    // and needs getrawmetatable/setrawmetatable to be visible.
+    install_http(L);
 
     set_function(L, "iscclosure", iscclosure);
     set_function(L, "islclosure", islclosure);

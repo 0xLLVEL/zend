@@ -4,7 +4,10 @@
 #include <sddl.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -23,13 +26,21 @@ constexpr std::uint32_t kMaxFrame = 16 * 1024 * 1024;
 SessionInfo g_session;
 std::atomic<bool> g_detached{false};
 
-// Serializes every frame written to the pipe. The output sink runs on the
-// client's scheduler thread while the serve thread is blocked inside
-// rbx::run, so replies and live print lines can race; the same lock also
-// pins the handle lifetime during disconnect.
+// Frames are written by a dedicated thread. The output sink runs on the
+// client's scheduler thread; if it wrote to the pipe directly, a stalled UI
+// reader would freeze the game until the pipe drained. The queue is bounded
+// and drops the oldest line under pressure instead of blocking the scheduler.
+constexpr std::size_t kMaxQueuedFrames = 512;
+
 std::mutex g_write;
+std::condition_variable g_write_cv;
+std::deque<std::string> g_outbox;
+bool g_writing = false;
+std::atomic<bool> g_connected{false};
+std::atomic<bool> g_writer_stop{false};
 std::atomic<HANDLE> g_pipe{INVALID_HANDLE_VALUE};
 HANDLE g_thread = nullptr;
+HANDLE g_writer = nullptr;
 
 std::uint64_t now_ms() {
     FILETIME ft{};
@@ -115,9 +126,7 @@ bool write_all(HANDLE pipe, const void* src, DWORD len) {
     return true;
 }
 
-// Caller must hold g_write.
-bool write_json(HANDLE pipe, const picojson::value& value) {
-    const std::string body = value.serialize();
+bool write_frame(HANDLE pipe, const std::string& body) {
     if (body.size() > kMaxFrame) {
         return false;
     }
@@ -133,9 +142,75 @@ bool write_json(HANDLE pipe, const picojson::value& value) {
            write_all(pipe, body.data(), static_cast<DWORD>(body.size()));
 }
 
-bool send_json(HANDLE pipe, const picojson::value& value) {
-    std::lock_guard<std::mutex> lock(g_write);
-    return write_json(pipe, value);
+// Never blocks the caller on the pipe. Returns false only when the frame is
+// too large; a missing client is a drop, not an error.
+bool enqueue_json(const picojson::value& value) {
+    if (!g_connected.load(std::memory_order_acquire)) {
+        return true;
+    }
+
+    std::string body = value.serialize();
+    if (body.size() > kMaxFrame) {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_write);
+        if (!g_connected.load(std::memory_order_relaxed)) {
+            return true;
+        }
+        if (g_outbox.size() >= kMaxQueuedFrames) {
+            g_outbox.pop_front();
+        }
+        g_outbox.push_back(std::move(body));
+    }
+    g_write_cv.notify_one();
+    return true;
+}
+
+bool send_json(HANDLE, const picojson::value& value) {
+    return enqueue_json(value);
+}
+
+void flush_output(DWORD timeout_ms) {
+    std::unique_lock<std::mutex> lock(g_write);
+    g_write_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [] {
+        return g_outbox.empty() && !g_writing;
+    });
+}
+
+DWORD WINAPI writer_thread(void*) {
+    for (;;) {
+        std::string body;
+        {
+            std::unique_lock<std::mutex> lock(g_write);
+            g_write_cv.wait(lock, [] {
+                return g_writer_stop.load() || !g_outbox.empty();
+            });
+            if (g_outbox.empty()) {
+                if (g_writer_stop.load()) {
+                    break;
+                }
+                continue;
+            }
+            body = std::move(g_outbox.front());
+            g_outbox.pop_front();
+            g_writing = true;
+        }
+
+        const HANDLE pipe = g_pipe.load();
+        const bool ok = pipe != INVALID_HANDLE_VALUE && write_frame(pipe, body);
+
+        {
+            std::lock_guard<std::mutex> lock(g_write);
+            g_writing = false;
+            if (!ok) {
+                g_outbox.clear();
+            }
+        }
+        g_write_cv.notify_all();
+    }
+    return 0;
 }
 
 bool send_event(HANDLE pipe, const char* level, const std::string& msg) {
@@ -149,43 +224,37 @@ bool send_event(HANDLE pipe, const char* level, const std::string& msg) {
 }
 
 // Executor output sink. Called from the client scheduler thread while user
-// code runs, so it only touches the pipe; the executor calls it outside its
-// own lock. One event per line so the UI can log lines as they arrive.
+// code runs, so it only enqueues a frame; a dedicated writer thread does the
+// blocking I/O. One event per line so the UI can log lines as they arrive.
 void stream_output(void*, std::uint64_t output_id, bool warn, const char* text,
                    std::size_t size) {
     const std::string_view view = text ? std::string_view(text, size)
                                        : std::string_view();
     const char* kind = warn ? "warn" : "print";
 
-    auto emit = [&](HANDLE pipe, std::string_view line) {
+    auto emit = [&](std::string_view line) {
         picojson::object obj;
         obj["v"] = picojson::value(static_cast<double>(kProtocolVersion));
         obj["op"] = picojson::value("output");
         obj["id"] = picojson::value(static_cast<double>(output_id));
         obj["kind"] = picojson::value(kind);
         obj["text"] = picojson::value(std::string(line));
-        return write_json(pipe, picojson::value(obj));
+        enqueue_json(picojson::value(obj));
     };
-
-    std::lock_guard<std::mutex> lock(g_write);
-    const HANDLE pipe = g_pipe.load();
-    if (pipe == INVALID_HANDLE_VALUE) {
-        return;
-    }
 
     // Keep empty lines ("print('')"), but not the executor's trailing newline.
     std::size_t start = 0;
     while (start < view.size()) {
         const std::size_t nl = view.find('\n', start);
         if (nl == std::string_view::npos) {
-            emit(pipe, view.substr(start));
+            emit(view.substr(start));
             break;
         }
-        emit(pipe, view.substr(start, nl - start));
+        emit(view.substr(start, nl - start));
         start = nl + 1;
     }
     if (view.empty()) {
-        emit(pipe, view);
+        emit(view);
     }
 }
 
@@ -315,11 +384,34 @@ bool handle(HANDLE pipe, const picojson::value& value, bool& greeted, bool& deta
     return true;
 }
 
+// A synchronous pipe handle serializes a pending ReadFile with writes from
+// other threads, so the server must never sit in ReadFile while idle. Poll for
+// bytes instead; the writer thread can then deliver output immediately.
+bool wait_for_bytes(HANDLE pipe, DWORD need) {
+    for (;;) {
+        if (g_detached.load()) {
+            return false;
+        }
+        DWORD available = 0;
+        if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
+            return false;
+        }
+        if (available >= need) {
+            return true;
+        }
+        Sleep(5);
+    }
+}
+
 void serve(HANDLE pipe) {
     bool greeted = false;
     bool detach = false;
 
     while (!detach) {
+        if (!wait_for_bytes(pipe, 4)) {
+            break;
+        }
+
         unsigned char header[4]{};
         if (!read_exact(pipe, header, sizeof(header))) {
             break;
@@ -331,6 +423,10 @@ void serve(HANDLE pipe) {
                                   (static_cast<std::uint32_t>(header[3]) << 24);
         if (len > kMaxFrame) {
             log("ipc: frame exceeds 16 MiB, dropping client");
+            break;
+        }
+
+        if (len != 0 && !wait_for_bytes(pipe, len)) {
             break;
         }
 
@@ -414,15 +510,23 @@ DWORD WINAPI serve_thread(void*) {
         {
             std::lock_guard<std::mutex> lock(g_write);
             g_pipe = pipe;
+            g_outbox.clear();
+            g_connected = true;
         }
         serve(pipe);
-        {
-            // Block new stream writes before the handle goes away; a chunk
-            // still suspended in the client keeps running with output dropped.
-            std::lock_guard<std::mutex> lock(g_write);
-            g_pipe = INVALID_HANDLE_VALUE;
-        }
+
+        // Stop accepting new frames, give the writer a moment to flush the
+        // detach acknowledgement, then cancel whatever is still stuck.
+        g_connected = false;
+        flush_output(250);
         DisconnectNamedPipe(pipe);
+        {
+            std::unique_lock<std::mutex> lock(g_write);
+            g_write_cv.wait_for(lock, std::chrono::milliseconds(500),
+                                [] { return !g_writing; });
+            g_pipe = INVALID_HANDLE_VALUE;
+            g_outbox.clear();
+        }
         log("ipc: client disconnected");
 
         if (!g_detached.load()) {
@@ -443,9 +547,19 @@ bool start() {
     }
 
     rbx::executor::set_output_sink(&stream_output, nullptr);
+    g_writer = CreateThread(nullptr, 0, writer_thread, nullptr, 0, nullptr);
+    if (!g_writer) {
+        rbx::executor::set_output_sink(nullptr, nullptr);
+        log("ipc: could not start writer thread");
+        remove_session();
+        return false;
+    }
+
     g_thread = CreateThread(nullptr, 0, serve_thread, nullptr, 0, nullptr);
     if (!g_thread) {
         rbx::executor::set_output_sink(nullptr, nullptr);
+        g_writer_stop = true;
+        g_write_cv.notify_all();
         log("ipc: could not start pipe thread");
         remove_session();
         return false;
@@ -460,6 +574,9 @@ void stop() {
     // sink only needs the handle check, which is atomic.
     g_pipe.store(INVALID_HANDLE_VALUE);
     g_detached = true;
+    g_connected = false;
+    g_writer_stop = true;
+    g_write_cv.notify_all();
     remove_session();
 }
 

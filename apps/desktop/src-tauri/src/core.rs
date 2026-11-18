@@ -14,7 +14,6 @@ use tokio::sync::mpsc;
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_FRAME: u32 = 16 * 1024 * 1024;
 const LOG_CAP: usize = 500;
-const SESSION_STALE_MS: u64 = 10 * 60 * 1000;
 
 #[derive(Clone, Serialize)]
 pub struct Status {
@@ -84,7 +83,40 @@ pub enum CoreEvent {
 
 impl CoreEvent {
     fn emit(&self, app: &AppHandle) {
+        let started = Instant::now();
         let _ = app.emit("core-event", self);
+        let ms = started.elapsed().as_millis();
+        if ms >= 20 {
+            app_log(format!("emit {} blocked {ms} ms", self.kind()));
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            CoreEvent::Status { .. } => "status",
+            CoreEvent::Log { .. } => "log",
+            CoreEvent::Result { .. } => "result",
+            CoreEvent::Output { .. } => "output",
+            CoreEvent::Toast { .. } => "toast",
+        }
+    }
+}
+
+// Diagnostic only: reader/emit timings are invisible in the UI because a
+// stalled emit also stalls the log line it would produce.
+fn app_log(msg: impl AsRef<str>) {
+    use std::io::Write;
+
+    let Some(dir) = std::env::var_os("LOCALAPPDATA") else {
+        return;
+    };
+    let path = PathBuf::from(dir).join("zend").join("logs").join("app.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{} {}", now_ms(), msg.as_ref());
     }
 }
 
@@ -144,10 +176,34 @@ fn normalize_pipe(name: &str) -> &str {
     name.trim().trim_start_matches(r"\\.\pipe\")
 }
 
+#[cfg(windows)]
+fn pid_alive(pid: u32) -> bool {
+    use std::ffi::c_void;
+
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn GetExitCodeProcess(handle: *mut c_void, code: *mut u32) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        CloseHandle(handle);
+        ok && code == STILL_ACTIVE
+    }
+}
+
 fn find_session(pipe_filter: Option<&str>) -> Option<(PathBuf, SessionFile)> {
     let dir = session_dir()?;
     let entries = std::fs::read_dir(dir).ok()?;
-    let now = now_ms();
     let filter = pipe_filter.map(normalize_pipe).filter(|name| !name.is_empty());
     let mut best: Option<(PathBuf, SessionFile)> = None;
 
@@ -172,7 +228,10 @@ fn find_session(pipe_filter: Option<&str>) -> Option<(PathBuf, SessionFile)> {
         if session.v != PROTOCOL_VERSION {
             continue;
         }
-        if now.saturating_sub(session.ts.saturating_mul(1000)) > SESSION_STALE_MS {
+        // Sessions are written once when the core loads. A live client can
+        // outlive any freshness window, and a crashed one can leave a fresh
+        // (or clock-skewed) timestamp behind, so trust the PID instead.
+        if !pid_alive(session.pid) {
             continue;
         }
         if filter.is_some_and(|want| normalize_pipe(&session.pipe) != want) {
@@ -361,11 +420,16 @@ async fn writer_task(
         framed.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         framed.extend_from_slice(&payload);
 
+        let started = Instant::now();
         if write.write_all(&framed).await.is_err() {
             break;
         }
         if write.flush().await.is_err() {
             break;
+        }
+        let ms = started.elapsed().as_millis();
+        if ms >= 20 {
+            app_log(format!("write {} bytes took {ms} ms", framed.len()));
         }
     }
 }
@@ -407,7 +471,17 @@ async fn reader_task(
             }
         };
 
+        let op = value
+            .get("op")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let started = Instant::now();
         handle_message(&app, &rt, &value);
+        let ms = started.elapsed().as_millis();
+        if ms >= 20 {
+            app_log(format!("handle {op} took {ms} ms"));
+        }
     }
 
     if rt.generation.load(Ordering::SeqCst) != generation {

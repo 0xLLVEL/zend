@@ -60,3 +60,8 @@ changes, that test fails together with the `static_assert`s.
 Configure the loader with `-DZEND_DETLOG=ON` (sets `kDebugLog`) for a QA build.
 Keep it `OFF` for shipped builds: the section and the log file are observable
 from other processes.
+
+The JSONL mirror is opt-in: set `ZEND_DETLOG_FILE=1` in the client's
+environment to append `detlog.jsonl` next to the module (or in `%TEMP%`).
+Without it only the shared section is written — timing probes alone can append
+hundreds of megabytes per session, and the soak reads the section.

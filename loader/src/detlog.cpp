@@ -120,9 +120,6 @@ emit(const DetEvent &E)
     std::uint64_t rva = 0;
     int n;
 
-    if (g_Log == INVALID_HANDLE_VALUE) {
-        return;
-    }
     if (E.Caller >= reinterpret_cast<std::uint64_t>(g_Base)) {
         rva = E.Caller - reinterpret_cast<std::uint64_t>(g_Base);
     }
@@ -138,7 +135,7 @@ emit(const DetEvent &E)
         static_cast<unsigned long long>(E.A0), static_cast<unsigned long long>(E.A1),
         static_cast<unsigned long long>(E.A2), static_cast<unsigned long long>(E.A3),
         static_cast<unsigned long>(g_Heat));
-    if (n > 0 && static_cast<std::size_t>(n) < sizeof(line)) {
+    if (n > 0 && static_cast<std::size_t>(n) < sizeof(line) && g_Log != INVALID_HANDLE_VALUE) {
         DWORD w = 0;
         WriteFile(g_Log, line, static_cast<DWORD>(n), &w, nullptr);
     }
@@ -175,12 +172,19 @@ detInit()
         g_Hdr->Pid = GetCurrentProcessId();
         g_Ring = reinterpret_cast<DetEvent *>(g_Hdr + 1);
     }
-    if (!g_Dir.empty()) {
+    bool file_log = false;
+    {
+        wchar_t opt[8]{};
+        if (GetEnvironmentVariableW(L"ZEND_DETLOG_FILE", opt, 8) != 0 && opt[0] == L'1') {
+            file_log = true;
+        }
+    }
+    if (file_log && !g_Dir.empty()) {
         file = g_Dir + L"\\detlog.jsonl";
         g_Log = CreateFileW(file.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     }
-    if (g_Log == INVALID_HANDLE_VALUE) {
+    if (file_log && g_Log == INVALID_HANDLE_VALUE) {
         wchar_t tmp[MAX_PATH]{};
         if (GetTempPathW(MAX_PATH, tmp)) {
             file.assign(tmp);
@@ -193,6 +197,8 @@ detInit()
         char b[512];
         std::snprintf(b, sizeof(b), "detlog=%ls heat=0 ring=%u", file.c_str(), kDetCapacity);
         trace(b);
+    } else {
+        trace("detlog=section-only heat=0");
     }
     return g_Hdr != nullptr;
 }

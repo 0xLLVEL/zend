@@ -29,8 +29,9 @@ payload archives are published.
   `pcall` work without freezing rendering.
 - A dispatch generation guards `__zend_finish`, so a chunk from an old VM cannot
   complete a newer job.
-- `print`/`warn` stream to the app while the script is still running, grouped
-  under the request id.
+- `print`/`warn` keep the client's native behavior (they still reach the
+  developer console) and also stream to the app while the script is running,
+  grouped under the request id.
 
 ### Luau API
 

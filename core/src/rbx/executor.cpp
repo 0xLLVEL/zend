@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <chrono>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -49,6 +50,13 @@ executor::OutputFn g_output_sink = nullptr;
 void* g_output_context = nullptr;
 std::uint64_t g_output_id = 0;
 
+// The client's own print/warn, captured before the wrappers are installed so
+// executor output still reaches the developer console. References live in the
+// current VM's registry and are invalidated when the VM changes.
+global_State* g_native_global = nullptr;
+int g_print_ref = LUA_NOREF;
+int g_warn_ref = LUA_NOREF;
+
 // The client stores proto capabilities behind a pointer that must stay alive.
 std::uintptr_t g_capabilities = ~std::uintptr_t{0};
 
@@ -70,6 +78,26 @@ __zend_finish(gen, ok, err)
 
 std::string g_runner_bytecode;
 
+// Calls the client's original print/warn so the developer console keeps the
+// native behavior. Errors from user __tostring hooks are dropped: capture still
+// owns the app stream.
+void call_native(lua_State* L, int ref, int count) {
+    if (ref == LUA_NOREF) {
+        return;
+    }
+    lua_getref(L, ref);
+    if (!lua_isfunction(L, -1)) {
+        lua_pop(L, 1);
+        return;
+    }
+    for (int i = 1; i <= count; ++i) {
+        lua_pushvalue(L, i);
+    }
+    if (lua_pcall(L, count, 0, 0) != 0) {
+        lua_pop(L, 1);
+    }
+}
+
 int capture_line(lua_State* L, bool warn) {
     const int count = lua_gettop(L);
 
@@ -89,6 +117,10 @@ int capture_line(lua_State* L, bool warn) {
     }
     line.push_back('\n');
 
+    // Mirror to the client first: this is plain print/warn behavior, and it
+    // must stay independent of the pipe.
+    call_native(L, warn ? g_warn_ref : g_print_ref, count);
+
     executor::OutputFn sink = nullptr;
     void* context = nullptr;
     std::uint64_t output_id = 0;
@@ -103,7 +135,15 @@ int capture_line(lua_State* L, bool warn) {
     // Outside the lock: the pipe may block on a slow reader, and complete()
     // must still be able to take g_mutex.
     if (sink) {
+        const auto started = std::chrono::steady_clock::now();
         sink(context, output_id, warn, line.data(), line.size());
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        const auto ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+        if (ms >= 50) {
+            logf("rbx: output sink blocked %lld ms",
+                 static_cast<long long>(ms));
+        }
     }
     return 0;
 }
@@ -492,7 +532,31 @@ bool init(std::uintptr_t script_context, std::string& error) {
     // C frames, where a throw cannot be contained.
     lua_setsafeenv(thread, LUA_GLOBALSINDEX, 0);
 
-    // Shadow the sandboxed print/warn so execution output reaches the pipe.
+    // Keep the client's print/warn and wrap them: the app gets the stream, the
+    // developer console keeps the native output. A fresh sandbox exposes the
+    // client functions again, so capture them once per VM.
+    if (g_native_global != thread->global) {
+        g_native_global = thread->global;
+        g_print_ref = LUA_NOREF;
+        g_warn_ref = LUA_NOREF;
+    }
+
+    lua_getglobal(thread, "print");
+    if (g_print_ref == LUA_NOREF && lua_isfunction(thread, -1) &&
+        lua_tocfunction(thread, -1) != capture_print) {
+        g_print_ref = lua_ref(thread, -1);
+    }
+    lua_pop(thread, 1);
+
+    lua_getglobal(thread, "warn");
+    if (g_warn_ref == LUA_NOREF && lua_isfunction(thread, -1) &&
+        lua_tocfunction(thread, -1) != capture_warn) {
+        g_warn_ref = lua_ref(thread, -1);
+    }
+    lua_pop(thread, 1);
+
+    // Wrap the sandboxed print/warn: the wrappers mirror to the client and
+    // stream the same line to the app.
     lua_pushcclosure(thread, capture_print, "print", 0);
     lua_setglobal(thread, "print");
     lua_pushcclosure(thread, capture_warn, "warn", 0);
@@ -549,6 +613,10 @@ void reset() {
     g_finish_context = nullptr;
     g_output_id = 0;
     g_output.clear();
+    // The refs belong to the VM that is going away; do not unref a dead state.
+    g_native_global = nullptr;
+    g_print_ref = LUA_NOREF;
+    g_warn_ref = LUA_NOREF;
     // A suspended chunk from the old VM must never complete a newer dispatch.
     ++g_generation;
 }

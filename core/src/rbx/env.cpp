@@ -79,11 +79,131 @@ void push_gcobject(lua_State* L, GCObject* gco) {
     L->top = top + 1;
 }
 
-// The real global table of the client's main thread, cloned once per VM and
-// rooted in the registry. Cloning is shallow; the fields are the client's
-// original objects, so writing to the clone cannot affect the real env.
+// The executor's own global table. Chunks execute with the client's sandbox
+// proxy as their closure environment; that proxy indexes this table, which in
+// turn indexes the client globals. getgenv() hands out this table, so writes
+// through getfenv() stay local to the proxy and cannot pollute getgenv().
+int g_genv_ref = LUA_NOREF;
+global_State* g_genv_global = nullptr;
+
+// The real client global table, returned directly by getrenv. It is anchored
+// by the VM's main thread, but keeping a ref lets us detect a VM change.
 int g_renv_ref = LUA_NOREF;
 global_State* g_renv_global = nullptr;
+
+// Executor HTTP methods for the DataModel. They are routed through the shared
+// instance metatable's own closures so `game` keeps the same metatable as the
+// rest of the Instances; replacing that metatable would hide the real
+// __newindex/__index slots from getrawmetatable.
+int g_http_get_ref = LUA_NOREF;
+int g_http_post_ref = LUA_NOREF;
+int g_game_ref = LUA_NOREF;
+lua_CFunction g_instance_index = nullptr;
+lua_CFunction g_instance_namecall = nullptr;
+
+// --- namecall frames ------------------------------------------------------
+//
+// The VM sets L->namecall for a namecall and never clears it, so a plain
+// getnamecallmethod() would keep returning the last method long after the
+// call returned. Each __namecall invocation we own records its call depth and
+// atom; a frame is active only while its call frame is still on the stack.
+// getnamecallmethod() answers only from an active frame.
+
+struct NamecallFrame {
+    int depth;
+    Closure* target;
+    TString* atom;
+    int atom_ref;
+    int thread_ref;
+};
+
+std::unordered_map<lua_State*, std::vector<NamecallFrame>> g_namecall_frames;
+
+void release_namecall_frame(lua_State* L, NamecallFrame& frame) {
+    if (frame.atom_ref != LUA_NOREF) {
+        lua_unref(L, frame.atom_ref);
+        frame.atom_ref = LUA_NOREF;
+    }
+    if (frame.thread_ref != LUA_NOREF) {
+        lua_unref(L, frame.thread_ref);
+        frame.thread_ref = LUA_NOREF;
+    }
+}
+
+void begin_namecall_frame(lua_State* L, Closure* target) {
+    auto& frames = g_namecall_frames[L];
+    const int depth = static_cast<int>(L->ci - L->base_ci);
+    while (!frames.empty() && frames.back().depth >= depth) {
+        release_namecall_frame(L, frames.back());
+        frames.pop_back();
+    }
+    if (frames.size() >= 128) {
+        luaL_error(L, "namecall hook nesting limit exceeded");
+    }
+
+    NamecallFrame frame{depth, target, L->namecall, LUA_NOREF, LUA_NOREF};
+
+    // Pins the thread so a suspended namecall keeps its frames keyed to a live
+    // lua_State instead of an address that a new thread could reuse.
+    lua_pushthread(L);
+    frame.thread_ref = lua_ref(L, -1);
+    lua_pop(L, 1);
+
+    if (frame.atom) {
+        lua_pushlstring(L, frame.atom->data, frame.atom->len);
+        frame.atom_ref = lua_ref(L, -1);
+        lua_pop(L, 1);
+    }
+    frames.push_back(frame);
+}
+
+bool restore_namecall_atom(lua_State* L) {
+    auto found = g_namecall_frames.find(L);
+    if (found == g_namecall_frames.end()) {
+        return false;
+    }
+
+    auto& frames = found->second;
+    const int depth = static_cast<int>(L->ci - L->base_ci);
+    for (auto it = frames.begin(); it != frames.end();) {
+        const bool active =
+            it->depth > 0 && it->depth <= depth &&
+            ttisfunction((L->base_ci + it->depth)->func) &&
+            clvalue((L->base_ci + it->depth)->func) == it->target;
+        if (!active) {
+            release_namecall_frame(L, *it);
+            it = frames.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    if (frames.empty()) {
+        g_namecall_frames.erase(found);
+        return false;
+    }
+    L->namecall = frames.back().atom;
+    return true;
+}
+
+void end_namecall_frame(lua_State* L) {
+    auto found = g_namecall_frames.find(L);
+    if (found == g_namecall_frames.end()) {
+        return;
+    }
+
+    auto& frames = found->second;
+    const int depth = static_cast<int>(L->ci - L->base_ci);
+    if (frames.empty() || frames.back().depth != depth ||
+        frames.back().target != curr_func(L)) {
+        return;
+    }
+
+    L->namecall = frames.back().atom;
+    release_namecall_frame(L, frames.back());
+    frames.pop_back();
+    restore_namecall_atom(L);
+}
 
 int identifyexecutor(lua_State* L) {
     lua_pushstring(L, "ZEND");
@@ -92,6 +212,11 @@ int identifyexecutor(lua_State* L) {
 }
 
 int getnamecallmethod(lua_State* L) {
+    if (!restore_namecall_atom(L)) {
+        lua_pushnil(L);
+        return 1;
+    }
+
     const char* method = lua_namecallatom(L, nullptr);
     if (method) {
         lua_pushstring(L, method);
@@ -102,17 +227,14 @@ int getnamecallmethod(lua_State* L) {
 }
 
 int getgenv(lua_State* L) {
-    lua_State* owner = executor::thread();
-    if (!owner || owner == L || owner->global != L->global) {
-        lua_pushvalue(L, LUA_GLOBALSINDEX);
+    if (g_genv_global == L->global && g_genv_ref != LUA_NOREF) {
+        lua_getref(L, g_genv_ref);
         return 1;
     }
 
-    lua_rawcheckstack(L, 1);
-    luaC_threadbarrier(L);
-    luaC_threadbarrier(owner);
-    lua_pushvalue(owner, LUA_GLOBALSINDEX);
-    lua_xmove(owner, L, 1);
+    // Before install() built the shared table (or for a foreign VM), fall back
+    // to the caller's environment.
+    lua_pushvalue(L, LUA_GLOBALSINDEX);
     return 1;
 }
 
@@ -129,14 +251,47 @@ int getrenv(lua_State* L) {
         g_renv_global = L->global;
         g_renv_ref = LUA_NOREF;
 
-        LuaTable* clone = luaH_clone(L, main->gt);
-        lua_rawcheckstack(L, 2);
+        lua_rawcheckstack(L, 4);
         luaC_threadbarrier(L);
-        luaC_threadbarrier(main);
-        sethvalue(L, L->top, clone);
+        sethvalue(L, L->top, main->gt);
         incr_top(L);
+        const int renv = lua_gettop(L);
 
-        lua_pushvalue(L, -1);
+        // The client marks its globals read-only for engine scripts. Scripts
+        // expect to assign through getrenv(), so hand out the real table with
+        // the flag cleared.
+        lua_setreadonly(L, renv, 0);
+
+        lua_pushvalue(L, renv);
+        lua_setfield(L, renv, "_G");
+
+        // Reuse the executor's shared table so `shared`, getgenv().shared and
+        // getrenv().shared are the same storage.
+        bool shared_ready = false;
+        if (g_genv_global == L->global && g_genv_ref != LUA_NOREF) {
+            lua_getref(L, g_genv_ref);
+            lua_getfield(L, -1, "shared");
+            if (lua_istable(L, -1)) {
+                shared_ready = true;
+            } else {
+                lua_pop(L, 1);
+                lua_newtable(L);
+                lua_pushvalue(L, -1);
+                lua_setfield(L, -3, "shared");
+            }
+            lua_pushvalue(L, -1);
+            lua_setfield(L, renv, "shared");
+            lua_pop(L, 2); // shared, getgenv
+        }
+
+        if (!shared_ready) {
+            lua_newtable(L);
+            lua_pushvalue(L, -1);
+            lua_setfield(L, renv, "shared");
+            lua_pop(L, 1);
+        }
+
+        lua_pushvalue(L, renv);
         g_renv_ref = lua_ref(L, -1);
         lua_pop(L, 2);
     }
@@ -1760,15 +1915,24 @@ int islclosure(lua_State* L) {
     return 1;
 }
 
-// True only when the frame that called checkcaller is one of the C closures
-// this environment installed. A user chunk always gets false, which is what
-// scripts and anti-cheat probes expect.
+// An executor thread has no owning script, so its weak_ptr is empty/expired.
+// The client uses the same check to classify its own threads.
+bool extra_script_expired(const RobloxExtraSpace* space) {
+    return !space || space->script.expired();
+}
+
+// Caller classification follows the reference: our own executor thread, or a
+// thread owned by the client that either has no script or full capabilities.
+// Identity changes alone must not change the answer.
 int checkcaller(lua_State* L) {
+    lua_State* owner = executor::thread();
     bool ours = false;
-    if (L->ci > L->base_ci) {
-        CallInfo* caller = L->ci - 1;
-        if (caller->func && ttisfunction(caller->func)) {
-            ours = g_own_closures.contains(clvalue(caller->func));
+    if (owner && owner->global == L->global) {
+        if (L == owner) {
+            ours = true;
+        } else if (L->userdata) {
+            ours = extra_script_expired(L->userdata) ||
+                   L->userdata->capabilities == ~std::uint64_t{0};
         }
     }
     lua_pushboolean(L, ours);
@@ -1894,8 +2058,11 @@ void copy_closure_body(lua_State* L, Closure* target, Closure* source) {
 
 // Resumes a yielding hook/wrapper. The VM restores the call frame and hands
 // the results back at L->base, so the result count is the whole visible stack.
+// A __namecall wrapper that yielded needs its frame closed here too; the check
+// is a no-op for every other dispatcher.
 int dispatch_continuation(lua_State* L, int status) {
     (void)status;
+    end_namecall_frame(L);
     return lua_gettop(L);
 }
 
@@ -2106,16 +2273,17 @@ void release_hook(lua_State* L, HookRecord& record) {
     release_ref(L, record.hook_ref);
 }
 
-// The shared hookfunction body. `hook == original` uninstalls the hook, which
-// is the standard way scripts swap a hook out without losing the record.
-int hook_function(lua_State* L) {
-    Closure* target = to_closure(L, 1);
-    Closure* hook = to_closure(L, 2);
+// The shared hook body. `hook == original` uninstalls the hook, which is the
+// standard way scripts swap a hook out without losing the record. Both values
+// are taken from the given stack indices.
+int install_hook(lua_State* L, int target_index, int hook_index) {
+    Closure* target = to_closure(L, target_index);
+    Closure* hook = to_closure(L, hook_index);
 
     auto it = g_hooks.find(target);
     if (it == g_hooks.end()) {
         HookRecord record;
-        record.target_ref = ref_at(L, 1);
+        record.target_ref = ref_at(L, target_index);
         record.own_before = g_own_closures.contains(target);
 
         auto wrapper = g_newc.find(target);
@@ -2137,7 +2305,7 @@ int hook_function(lua_State* L) {
         restore_hook_body(L, target, it->second);
         release_hook(L, it->second);
         g_hooks.erase(it);
-        lua_pushvalue(L, 2);
+        lua_pushvalue(L, hook_index);
         return 1;
     }
 
@@ -2149,12 +2317,175 @@ int hook_function(lua_State* L) {
     }
 
     release_ref(L, it->second.hook_ref);
-    it->second.hook_ref = ref_at(L, 2);
+    it->second.hook_ref = ref_at(L, hook_index);
     install_hook_body(L, target);
 
     lua_getref(L, previous_ref);
     lua_unref(L, previous_ref);
     return 1;
+}
+
+int hook_function(lua_State* L) {
+    return install_hook(L, 1, 2);
+}
+
+// The __namecall slot is swapped with this C wrapper instead of patching the
+// client's native closure in place. The user hook is the upvalue, so nested
+// hooks and restores stay independent while the VM keeps L->namecall alive for
+// the duration of the call.
+int namecall_wrapper(lua_State* L) {
+    Closure* current = curr_func(L);
+    begin_namecall_frame(L, current);
+
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 1);
+    luaD_callint(L, L->base, LUA_MULTRET, lua_isyieldable(L) != 0);
+    if (isyielded(L)) {
+        return C_CALL_YIELD;
+    }
+
+    end_namecall_frame(L);
+    return lua_gettop(L);
+}
+
+// True when argument 1 is the DataModel. The ref is set during install, so
+// this is only ever called after the HTTP prelude has run.
+bool is_data_model(lua_State* L) {
+    if (g_game_ref == LUA_NOREF) {
+        return false;
+    }
+    lua_getref(L, g_game_ref);
+    const bool same = lua_rawequal(L, 1, -1) != 0;
+    lua_pop(L, 1);
+    return same;
+}
+
+int instance_index_wrapper(lua_State* L) {
+    if (lua_type(L, 2) == LUA_TSTRING) {
+        std::size_t length = 0;
+        const char* key = lua_tolstring(L, 2, &length);
+        int method_ref = LUA_NOREF;
+        if ((length == 7 && std::memcmp(key, "HttpGet", 7) == 0) ||
+            (length == 12 && std::memcmp(key, "HttpGetAsync", 12) == 0)) {
+            method_ref = g_http_get_ref;
+        } else if ((length == 8 && std::memcmp(key, "HttpPost", 8) == 0) ||
+                   (length == 13 && std::memcmp(key, "HttpPostAsync", 13) == 0)) {
+            method_ref = g_http_post_ref;
+        }
+
+        if (method_ref != LUA_NOREF && is_data_model(L)) {
+            lua_getref(L, method_ref);
+            return 1;
+        }
+    }
+
+    return g_instance_index ? g_instance_index(L) : 0;
+}
+
+int instance_namecall_wrapper(lua_State* L) {
+    const char* method = lua_namecallatom(L, nullptr);
+    if (method) {
+        int method_ref = LUA_NOREF;
+        if (std::strcmp(method, "HttpGet") == 0 ||
+            std::strcmp(method, "HttpGetAsync") == 0) {
+            method_ref = g_http_get_ref;
+        } else if (std::strcmp(method, "HttpPost") == 0 ||
+                   std::strcmp(method, "HttpPostAsync") == 0) {
+            method_ref = g_http_post_ref;
+        }
+
+        if (method_ref != LUA_NOREF && is_data_model(L)) {
+            // Drop the method receiver so the global gets the same arguments a
+            // plain HttpGet(url, ...) call would.
+            lua_getref(L, method_ref);
+            lua_remove(L, 1);
+            lua_insert(L, 1);
+            luaD_callint(L, L->base, LUA_MULTRET, lua_isyieldable(L) != 0);
+            if (isyielded(L)) {
+                return C_CALL_YIELD;
+            }
+            return lua_gettop(L);
+        }
+    }
+
+    return g_instance_namecall ? g_instance_namecall(L) : 0;
+}
+
+int setnamecallmethod(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TSTRING);
+    size_t length = 0;
+    const char* name = lua_tolstring(L, 1, &length);
+    auto found = g_namecall_frames.find(L);
+    if (found == g_namecall_frames.end() || found->second.empty()) {
+        return 0;
+    }
+
+    NamecallFrame& frame = found->second.back();
+    if (frame.atom_ref != LUA_NOREF) {
+        lua_unref(L, frame.atom_ref);
+        frame.atom_ref = LUA_NOREF;
+    }
+
+    frame.atom = length ? luaS_newlstr(L, name, length) : nullptr;
+    L->namecall = frame.atom;
+    if (frame.atom) {
+        lua_pushlstring(L, frame.atom->data, frame.atom->len);
+        frame.atom_ref = lua_ref(L, -1);
+        lua_pop(L, 1);
+    }
+    return 0;
+}
+
+int hookmetamethod(lua_State* L) {
+    luaL_checkany(L, 1);
+    luaL_checktype(L, 2, LUA_TSTRING);
+    luaL_checktype(L, 3, LUA_TFUNCTION);
+
+    const char* metamethod = lua_tostring(L, 2);
+
+    if (!lua_getmetatable(L, 1)) {
+        luaL_argerror(L, 1, "object has no metatable");
+    }
+    const int metatable = lua_gettop(L);
+
+    lua_rawgetfield(L, metatable, metamethod);
+    if (!lua_isfunction(L, -1)) {
+        luaL_argerror(L, 2, "metamethod is not a function");
+    }
+    const int previous = lua_gettop(L);
+
+    if (std::strcmp(metamethod, "__namecall") == 0) {
+        LuaTable* table = hvalue(luaA_toobject(L, metatable));
+        const bool was_readonly = table->readonly;
+        table->readonly = false;
+
+        Closure* current = clvalue(luaA_toobject(L, previous));
+        Closure* hook = clvalue(luaA_toobject(L, 3));
+        const bool is_restore =
+            current == hook || (hook->isC && hook->c.f == namecall_wrapper);
+
+        if (is_restore) {
+            lua_pushvalue(L, 3);
+            lua_rawsetfield(L, metatable, metamethod);
+        } else {
+            lua_pushvalue(L, 3);
+            lua_pushcclosurek(L, namecall_wrapper, "__namecall", 1,
+                              dispatch_continuation);
+            Closure* wrapper = clvalue(luaA_toobject(L, -1));
+            if (wrapper) {
+                g_own_closures.insert(wrapper);
+            }
+            lua_rawsetfield(L, metatable, metamethod);
+        }
+
+        table->readonly = was_readonly;
+        lua_pushvalue(L, previous);
+        return 1;
+    }
+
+    // Everything else is a regular closure hook: keep the slot's identity and
+    // return a snapshot of the original body.
+    return install_hook(L, previous, 3);
 }
 
 int hookfunction(lua_State* L) {
@@ -2389,30 +2720,6 @@ int debug_setupvalue(lua_State* L) {
     return 1;
 }
 
-int debug_getproto(lua_State* L) {
-    const int fn = push_function_arg(L, 1);
-    Closure* closure = lua_closure(L, fn, false);
-    Proto* parent = closure->l.p;
-    const int index = luaL_checkinteger(L, 2);
-
-    if (!parent || index < 1 || index > parent->sizep || !parent->p) {
-        luaL_argerror(L, 2, "index out of range");
-    }
-
-    Proto* wanted = parent->p[index - 1];
-    if (!wanted) {
-        luaL_argerror(L, 2, "proto is unavailable");
-    }
-
-    lua_rawcheckstack(L, 1);
-    luaC_threadbarrier(L);
-    Closure* child = luaF_newLclosure(L, wanted->nups, L->gt, wanted);
-    push_closure(L, child);
-
-    lua_remove(L, fn);
-    return 1;
-}
-
 CallInfo* visible_level(lua_State* L, int level) {
     for (CallInfo* frame = L->ci - 1; frame >= L->base_ci; --frame) {
         if (!frame->func || !ttisfunction(frame->func)) {
@@ -2428,38 +2735,374 @@ CallInfo* visible_level(lua_State* L, int level) {
     return nullptr;
 }
 
-int debug_getstack(lua_State* L) {
-    const int level = luaL_checkinteger(L, 1);
-    if (level <= 0) {
-        luaL_argerror(L, 1, "level must be positive");
+int stack_frame_size(lua_State* target, CallInfo* frame, Closure* closure) {
+    if (!target || !frame || !frame->base) {
+        return 0;
     }
 
-    CallInfo* frame = visible_level(L, level);
-    if (!frame) {
-        luaL_argerror(L, 1, "level out of range");
+    int size = 0;
+    if (closure && !closure->isC && closure->l.p) {
+        size = closure->l.p->maxstacksize;
     }
-    if (!frame->base) {
-        luaL_argerror(L, 1, "frame has no stack");
-    }
-
-    Closure* closure = clvalue(frame->func);
-    Proto* proto = closure->l.p;
-    int size = proto ? proto->maxstacksize : 0;
     if (size <= 0 && frame->top > frame->base) {
         size = static_cast<int>(frame->top - frame->base);
     }
-
-    const int stack_size = static_cast<int>(L->stacksize);
-    const StkId end = L->stack + stack_size;
-    if (frame->base < L->stack || frame->base >= end) {
-        luaL_argerror(L, 1, "frame stack is unavailable");
+    if (size <= 0 && target->top > frame->base) {
+        size = static_cast<int>(target->top - frame->base);
     }
-    const int available = static_cast<int>(end - frame->base);
-    if (size > available) {
+
+    const int available =
+        static_cast<int>((target->stack + target->stacksize) - frame->base);
+    if (available < size) {
         size = available;
     }
-    if (size < 0) {
-        size = 0;
+    return size > 0 ? size : 0;
+}
+
+// Resolves the frame selected by a level or a function value. Only Lua frames
+// are visible, matching getstack/setstack.
+CallInfo* resolve_stack_target(lua_State* L, int index, Closure*& out_closure) {
+    out_closure = nullptr;
+
+    if (lua_isnumber(L, index)) {
+        const int level = static_cast<int>(luaL_checkinteger(L, index));
+        if (level <= 0) {
+            luaL_argerror(L, index, "level must be positive");
+        }
+        CallInfo* frame = visible_level(L, level);
+        if (!frame) {
+            luaL_argerror(L, index, "level out of range");
+        }
+        out_closure = clvalue(frame->func);
+        return frame;
+    }
+
+    if (lua_isfunction(L, index)) {
+        Closure* wanted = clvalue(luaA_toobject(L, index));
+        for (CallInfo* frame = L->ci - 1; frame >= L->base_ci; --frame) {
+            if (!frame->func || !ttisfunction(frame->func)) {
+                continue;
+            }
+            if (clvalue(frame->func) == wanted) {
+                out_closure = wanted;
+                return frame;
+            }
+        }
+        luaL_argerror(L, index, "function not found in call stack");
+    }
+
+    luaL_argerror(L, index, "function or level expected");
+    return nullptr;
+}
+
+// Copies a proto for an inactive debug.getproto(s) result. The copy keeps the
+// metadata scripts inspect (constants, names, line info) but its bytecode is a
+// plain `return`, so calling it cannot execute the original code.
+Proto* clone_proto(lua_State* L, Proto* proto) {
+    Proto* clone = luaF_newproto(L);
+    if (!clone) {
+        return nullptr;
+    }
+
+    clone->is_vararg = proto->is_vararg;
+    clone->flags = proto->flags;
+    clone->maxstacksize = proto->maxstacksize;
+    clone->nups = proto->nups;
+    clone->numparams = proto->numparams;
+    clone->linedefined = proto->linedefined;
+    clone->bytecodeid = proto->bytecodeid;
+    clone->linegaplog2 = proto->linegaplog2;
+
+    if (proto->sizek > 0 && proto->k) {
+        clone->k = luaM_newarray(L, proto->sizek, TValue, clone->memcat);
+        for (int i = 0; i < proto->sizek; ++i) {
+            setobj2n(L, &clone->k[i], &proto->k[i]);
+        }
+        clone->sizek = proto->sizek;
+    }
+
+    if (proto->sizelineinfo > 0) {
+        const uint8_t* source_lineinfo = proto->lineinfo;
+        if (source_lineinfo) {
+            clone->lineinfo = luaM_newarray(L, proto->sizelineinfo, uint8_t,
+                                            clone->memcat);
+            uint8_t* lineinfo = clone->lineinfo;
+            std::memcpy(lineinfo, source_lineinfo, proto->sizelineinfo);
+            clone->sizelineinfo = proto->sizelineinfo;
+
+            // The absolute-line array shares the lineinfo allocation.
+            const int absoffset = (proto->sizecode + 3) & ~3;
+            clone->abslineinfo =
+                reinterpret_cast<int*>(lineinfo + absoffset);
+        }
+    }
+
+    if (proto->sizelocvars > 0 && proto->locvars) {
+        clone->locvars = luaM_newarray(L, proto->sizelocvars, LocVar,
+                                       clone->memcat);
+        for (int i = 0; i < proto->sizelocvars; ++i) {
+            clone->locvars[i] = proto->locvars[i];
+        }
+        clone->sizelocvars = proto->sizelocvars;
+    }
+
+    if (proto->sizeupvalues > 0) {
+        TString** names = proto->upvalues;
+        if (names) {
+            TString** copy = luaM_newarray(L, proto->sizeupvalues, TString*,
+                                           clone->memcat);
+            for (int i = 0; i < proto->sizeupvalues; ++i) {
+                copy[i] = names[i];
+            }
+            clone->upvalues = copy;
+            clone->sizeupvalues = proto->sizeupvalues;
+        }
+    }
+
+    clone->source = proto->source;
+    clone->debugname = proto->debugname;
+
+    const std::string bytecode = compile("return");
+    if (luau_load(L, "=zend-getproto", bytecode.data(), bytecode.size(), 0) ==
+        0) {
+        Closure* loader = clvalue(luaA_toobject(L, -1));
+        const Proto* harmless = loader ? loader->l.p : nullptr;
+        if (harmless && harmless->sizecode > 0 && harmless->code) {
+            clone->code = luaM_newarray(L, harmless->sizecode, uint32_t,
+                                        clone->memcat);
+            for (int i = 0; i < harmless->sizecode; ++i) {
+                clone->code[i] = harmless->code[i];
+            }
+            clone->sizecode = harmless->sizecode;
+            clone->codeentry = clone->code;
+        }
+        lua_pop(L, 1);
+    } else {
+        lua_pop(L, 1);
+    }
+
+    if (proto->sizep > 0 && proto->p) {
+        clone->p = luaM_newarray(L, proto->sizep, Proto*, clone->memcat);
+        for (int i = 0; i < proto->sizep; ++i) {
+            clone->p[i] = proto->p[i] ? clone_proto(L, proto->p[i]) : nullptr;
+        }
+        clone->sizep = proto->sizep;
+    }
+
+    return clone;
+}
+
+struct ProtoClosureScan {
+    lua_State* L;
+    int result;
+    int count;
+    Proto* wanted;
+};
+
+bool proto_closure_visitor(void* raw, lua_Page*, GCObject* gco) {
+    auto* scan = static_cast<ProtoClosureScan*>(raw);
+    lua_State* L = scan->L;
+    if (isdead(L->global, gco) || gco->gch.tt != LUA_TFUNCTION) {
+        return false;
+    }
+
+    Closure* closure = gco2cl(gco);
+    if (!closure || closure->isC || closure->l.p != scan->wanted) {
+        return false;
+    }
+
+    push_gcobject(L, gco);
+    lua_rawseti(L, scan->result, ++scan->count);
+    return false;
+}
+
+int debug_getproto(lua_State* L) {
+    const int fn = push_function_arg(L, 1);
+    Closure* closure = lua_closure(L, fn, false);
+    Proto* parent = closure->l.p;
+    const int index = luaL_checkinteger(L, 2);
+    const bool activated = luaL_optboolean(L, 3, 0) != 0;
+
+    if (!parent || index < 1 || index > parent->sizep || !parent->p) {
+        luaL_argerror(L, 2, "index out of range");
+    }
+
+    Proto* wanted = parent->p[index - 1];
+    if (!wanted) {
+        luaL_argerror(L, 2, "proto is unavailable");
+    }
+
+    lua_newtable(L);
+    const int result = lua_gettop(L);
+
+    // Objects are only reachable from this frame while it runs; park the
+    // collector so the scan and any proto copies cannot be collected midway.
+    const std::size_t threshold = L->global->GCthreshold;
+    L->global->GCthreshold = SIZE_MAX;
+
+    if (activated) {
+        ProtoClosureScan scan{L, result, 0, wanted};
+        lua_rawcheckstack(L, 1);
+        luaC_threadbarrier(L);
+        luaM_visitgco(L, &scan, proto_closure_visitor);
+    } else {
+        Proto* clone = clone_proto(L, wanted);
+        if (!clone) {
+            L->global->GCthreshold = threshold;
+            luaL_error(L, "failed to clone proto");
+        }
+        LuaTable* env = closure->env ? closure->env : L->gt;
+        Closure* child = luaF_newLclosure(L, wanted->nups, env, clone);
+        push_closure(L, child);
+        lua_rawseti(L, result, 1);
+    }
+
+    L->global->GCthreshold = threshold;
+    lua_remove(L, fn);
+    return 1;
+}
+
+int debug_getprotos(lua_State* L) {
+    const int fn = push_function_arg(L, 1);
+    Closure* closure = lua_closure(L, fn, false);
+    Proto* parent = closure->l.p;
+    const bool activated = luaL_optboolean(L, 2, 0) != 0;
+
+    if (!parent || parent->sizep <= 0 || !parent->p) {
+        lua_newtable(L);
+        lua_remove(L, fn);
+        return 1;
+    }
+
+    const std::size_t threshold = L->global->GCthreshold;
+    L->global->GCthreshold = SIZE_MAX;
+
+    lua_createtable(L, parent->sizep, 0);
+    LuaTable* env = closure->env ? closure->env : L->gt;
+    for (int i = 0; i < parent->sizep; ++i) {
+        Proto* child = parent->p[i];
+        if (!child) {
+            lua_pushnil(L);
+        } else {
+            Proto* proto = activated ? child : clone_proto(L, child);
+            Closure* child_closure =
+                luaF_newLclosure(L, child->nups, env, proto ? proto : child);
+            push_closure(L, child_closure);
+        }
+        lua_rawseti(L, -2, i + 1);
+    }
+
+    L->global->GCthreshold = threshold;
+    lua_remove(L, fn);
+    return 1;
+}
+
+int debug_getconstant(lua_State* L) {
+    const int fn = push_function_arg(L, 1);
+    Closure* closure = lua_closure(L, fn, false);
+    Proto* proto = closure->l.p;
+    const int index = luaL_checkinteger(L, 2);
+
+    if (!proto || proto->sizek <= 0) {
+        luaL_argerror(L, 1, "function has no constants");
+    }
+    if (index < 1 || index > proto->sizek) {
+        luaL_argerror(L, 2, "index out of range");
+    }
+
+    const TValue* constant = &proto->k[index - 1];
+    const int type = constant->tt;
+    if (type == LUA_TNIL || type == LUA_TTABLE || type == LUA_TFUNCTION) {
+        lua_pushnil(L);
+    } else {
+        luaC_threadbarrier(L);
+        luaA_pushvalue(L, constant);
+    }
+
+    lua_remove(L, fn);
+    return 1;
+}
+
+int debug_setconstant(lua_State* L) {
+    luaL_checkany(L, 3);
+
+    const int fn = push_function_arg(L, 1);
+    Closure* closure = lua_closure(L, fn, false);
+    Proto* proto = closure->l.p;
+    const int index = luaL_checkinteger(L, 2);
+
+    if (!proto || proto->sizek <= 0) {
+        luaL_argerror(L, 1, "function has no constants");
+    }
+    if (index < 1 || index > proto->sizek) {
+        luaL_argerror(L, 2, "index out of range");
+    }
+
+    TValue* constant = &proto->k[index - 1];
+    if (constant->tt != LUA_TFUNCTION && constant->tt != LUA_TTABLE) {
+        const TValue* value = luaA_toobject(L, 3);
+        if (value && value->tt == constant->tt) {
+            setobj2n(L, constant, value);
+            luaC_barrier(L, proto, constant);
+        }
+    }
+
+    lua_remove(L, fn);
+    return 0;
+}
+
+int debug_getupvalue(lua_State* L) {
+    const int fn = push_function_arg(L, 1);
+    Closure* closure = lua_closure(L, fn, false);
+    const int index = luaL_checkinteger(L, 2);
+
+    if (!closure || index < 1 || index > closure->nupvalues) {
+        luaL_argerror(L, 2, "index out of range");
+    }
+
+    if (!lua_getupvalue(L, fn, index)) {
+        luaL_argerror(L, 2, "index out of range");
+    }
+    return 1;
+}
+
+int debug_getstack(lua_State* L) {
+    lua_State* target = L;
+    int arg = 1;
+    if (lua_isthread(L, 1)) {
+        target = lua_tothread(L, 1);
+        if (!target || target->global != L->global) {
+            luaL_argerror(L, 1, "invalid thread");
+        }
+        arg = 2;
+    }
+
+    const int level = static_cast<int>(luaL_checkinteger(L, arg));
+    if (level <= 0) {
+        luaL_argerror(L, arg, "level must be positive");
+    }
+
+    CallInfo* frame = visible_level(target, level);
+    if (!frame || !frame->base) {
+        luaL_argerror(L, arg, "level out of range");
+    }
+
+    Closure* closure = clvalue(frame->func);
+    if (!closure || closure->isC) {
+        luaL_error(L, "cannot get stack of a C function");
+    }
+
+    const int size = stack_frame_size(target, frame, closure);
+
+    if (!lua_isnoneornil(L, arg + 1)) {
+        const int index = static_cast<int>(luaL_checkinteger(L, arg + 1)) - 1;
+        if (index < 0 || index >= size) {
+            lua_pushnil(L);
+            return 1;
+        }
+        luaC_threadbarrier(L);
+        luaA_pushvalue(L, frame->base + index);
+        return 1;
     }
 
     lua_createtable(L, size, 0);
@@ -2470,6 +3113,31 @@ int debug_getstack(lua_State* L) {
         lua_rawseti(L, -2, i + 1);
     }
     return 1;
+}
+
+int debug_setstack(lua_State* L) {
+    Closure* closure = nullptr;
+    CallInfo* frame = resolve_stack_target(L, 1, closure);
+    if (!frame || !closure) {
+        return 0;
+    }
+    if (closure->isC) {
+        luaL_argerror(L, 1, "Lua function expected");
+    }
+
+    const int index = static_cast<int>(luaL_checkinteger(L, 2)) - 1;
+    const int size = stack_frame_size(L, frame, closure);
+    if (index < 0 || index >= size) {
+        luaL_argerror(L, 2, "index out of range");
+    }
+
+    const TValue* value = luaA_toobject(L, 3);
+    if (!value) {
+        luaL_argerror(L, 3, "invalid value");
+    }
+
+    setobj2s(L, frame->base + index, value);
+    return 0;
 }
 
 // --- filesystem ----------------------------------------------------------
@@ -4047,42 +4715,59 @@ http = {
     http_request = do_request,
 }
 
--- Instance methods are resolved through the DataModel's metatable. Give the
--- game userdata a private clone so HttpGet/HttpPost work with method syntax
--- without changing the shared instance metatable that every other object uses.
-do
-    local mt = getrawmetatable(game)
-    if type(mt) == "table" and type(mt.__index) == "function" and
-        type(mt.__namecall) == "function" and
-        not rawget(mt, "__zend_game_methods") then
-        local old_index = mt.__index
-        local old_namecall = mt.__namecall
-        local clone = {}
-        for key, value in pairs(mt) do
-            clone[key] = value
-        end
-        clone.__zend_game_methods = true
-        clone.__index = function(self, key)
-            if key == "HttpGet" or key == "HttpGetAsync" then
-                return HttpGet
-            elseif key == "HttpPost" or key == "HttpPostAsync" then
-                return HttpPost
-            end
-            return old_index(self, key)
-        end
-        clone.__namecall = function(self, ...)
-            local method = getnamecallmethod()
-            if method == "HttpGet" or method == "HttpGetAsync" then
-                return HttpGet(...)
-            elseif method == "HttpPost" or method == "HttpPostAsync" then
-                return HttpPost(...)
-            end
-            return old_namecall(self, ...)
-        end
-        pcall(setrawmetatable, game, clone)
-    end
-end
 )LUA";
+
+// Adds HttpGet/HttpPost to the DataModel without replacing its metatable. The
+// shared instance __index/__namecall closures are routed through wrappers that
+// only special-case `game`; every other key and object keeps the native path.
+void install_instance_http(lua_State* L) {
+    const int base = lua_gettop(L);
+
+    lua_getglobal(L, "HttpGet");
+    g_http_get_ref = lua_ref(L, -1);
+    lua_pop(L, 1);
+
+    lua_getglobal(L, "HttpPost");
+    g_http_post_ref = lua_ref(L, -1);
+    lua_pop(L, 1);
+
+    lua_getglobal(L, "game");
+    if (!lua_isuserdata(L, -1)) {
+        lua_settop(L, base);
+        return;
+    }
+    g_game_ref = lua_ref(L, -1);
+    lua_pop(L, 1);
+
+    lua_getglobal(L, "game");
+    if (!lua_getmetatable(L, -1)) {
+        lua_settop(L, base);
+        return;
+    }
+
+    lua_rawgetfield(L, -1, "__index");
+    if (lua_isfunction(L, -1)) {
+        Closure* method = clvalue(luaA_toobject(L, -1));
+        if (method && method->isC && method->c.f != instance_index_wrapper) {
+            g_instance_index = method->c.f;
+            method->c.f = instance_index_wrapper;
+        }
+    }
+    lua_pop(L, 1);
+
+    lua_rawgetfield(L, -1, "__namecall");
+    if (lua_isfunction(L, -1)) {
+        Closure* method = clvalue(luaA_toobject(L, -1));
+        if (method && method->isC && method->c.f != instance_namecall_wrapper) {
+            g_instance_namecall = method->c.f;
+            method->c.f = instance_namecall_wrapper;
+            method->c.cont = dispatch_continuation;
+        }
+    }
+    lua_pop(L, 1);
+
+    lua_settop(L, base);
+}
 
 void install_http(lua_State* L) {
     set_function(L, "__zend_http_start", http_start);
@@ -4100,6 +4785,8 @@ void install_http(lua_State* L) {
     if (lua_pcall(L, 0, 0, 0) != 0) {
         lua_pop(L, 1);
     }
+
+    install_instance_http(L);
 }
 
 // --- rconsole -------------------------------------------------------------
@@ -4354,7 +5041,107 @@ std::string compile(const std::string& source) {
     return Luau::compile(source, options, {}, &encoder);
 }
 
+// The client caches direct userdata property/namecall dispatchers per class
+// tag. As long as those pointers are live the VM never consults the metatable,
+// so metamethod hooks (getrawmetatable, hookmetamethod) would not fire. Drop
+// the pointers once; the VM backpatches the affected instructions to regular
+// table access on their next execution.
+void clear_instance_fast_paths(lua_State* L) {
+    lua_getglobal(L, "game");
+    if (!lua_isuserdata(L, -1)) {
+        lua_pop(L, 1);
+        return;
+    }
+
+    const int tag = lua_userdatatag(L, -1);
+    lua_pop(L, 1);
+    if (tag < 0 || tag >= UTAG_INTERNAL_LIMIT) {
+        return;
+    }
+
+    __try {
+        for (int i = 0; i < UTAG_INTERNAL_LIMIT; ++i) {
+            lua_UdataDirectAccessData& direct = L->global->udatadirect[i];
+            direct.index = nullptr;
+            direct.newindex = nullptr;
+            direct.namecall = nullptr;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 void install(lua_State* L) {
+    // Learn the real client globals through the sandbox proxy's __index before
+    // repointing it, and keep the proxy anchored while L->gt changes.
+    LuaTable* sandbox = L->gt;
+    LuaTable* client = nullptr;
+    if (sandbox && sandbox->metatable) {
+        TString* index_name = luaS_new(L, "__index");
+        const TValue* index = luaH_getstr(sandbox->metatable, index_name);
+        if (ttistable(index)) {
+            client = hvalue(index);
+        }
+    }
+
+    clear_instance_fast_paths(L);
+
+    lua_rawcheckstack(L, 3);
+    luaC_threadbarrier(L);
+    sethvalue(L, L->top, sandbox);
+    incr_top(L);
+    const int sandbox_index = lua_gettop(L);
+
+    lua_newtable(L);
+    const int genv_index = lua_gettop(L);
+    if (client) {
+        lua_newtable(L);
+        lua_rawcheckstack(L, 1);
+        luaC_threadbarrier(L);
+        sethvalue(L, L->top, client);
+        incr_top(L);
+        lua_setfield(L, -2, "__index");
+        lua_setmetatable(L, genv_index);
+    }
+
+    if (sandbox && sandbox->metatable) {
+        lua_rawcheckstack(L, 1);
+        luaC_threadbarrier(L);
+        sethvalue(L, L->top, sandbox->metatable);
+        incr_top(L);
+        const int readonly = lua_getreadonly(L, -1);
+        lua_setreadonly(L, -1, 0);
+        lua_pushvalue(L, genv_index);
+        lua_setfield(L, -2, "__index");
+        lua_setreadonly(L, -1, readonly);
+        lua_pop(L, 1);
+    }
+
+    // print/warn/__zend_finish were installed before this call. They belong to
+    // the executor side of the split, not to each chunk's proxy.
+    static const char* const kCarried[] = {"print", "warn", "__zend_finish"};
+    for (const char* name : kCarried) {
+        lua_pushstring(L, name);
+        lua_rawget(L, sandbox_index);
+        if (!lua_isnil(L, -1)) {
+            lua_pushvalue(L, -1);
+            lua_setfield(L, genv_index, name);
+            lua_pushstring(L, name);
+            lua_pushnil(L);
+            lua_rawset(L, sandbox_index);
+        }
+        lua_pop(L, 1);
+    }
+
+    lua_pushvalue(L, genv_index);
+    g_genv_ref = lua_ref(L, -1);
+    lua_pop(L, 1);
+    g_genv_global = L->global;
+
+    // Install with getgenv() as the global table so every helper lands in the
+    // shared table instead of the per-chunk proxy.
+    lua_pushvalue(L, genv_index);
+    lua_replace(L, LUA_GLOBALSINDEX);
+
     set_function(L, "identifyexecutor", identifyexecutor);
     set_function(L, "getgenv", getgenv);
     set_function(L, "getrenv", getrenv);
@@ -4392,12 +5179,14 @@ void install(lua_State* L) {
     set_function(L, "getmetatable", getrawmetatable);
     set_function(L, "setrawmetatable", setrawmetatable);
     set_function(L, "setmetatable", setrawmetatable);
+    set_function(L, "hookmetamethod", hookmetamethod);
+    set_function(L, "setnamecallmethod", setnamecallmethod);
     set_function(L, "setreadonly", setreadonly);
     set_function(L, "isreadonly", isreadonly);
     set_function(L, "make_writeable", make_writeable);
 
-    // Runs last: the prelude installs the DataModel's HttpGet/HttpPost methods
-    // and needs getrawmetatable/setrawmetatable to be visible.
+    // Runs last: the prelude defines HttpGet/HttpPost and then their DataModel
+    // bindings are added to the shared instance metatable.
     install_http(L);
 
     set_function(L, "iscclosure", iscclosure);
@@ -4417,33 +5206,60 @@ void install(lua_State* L) {
 
     set_function(L, "getinfo", debug_getinfo);
     set_function(L, "getconstants", debug_getconstants);
+    set_function(L, "getconstant", debug_getconstant);
+    set_function(L, "setconstant", debug_setconstant);
     set_function(L, "getupvalues", debug_getupvalues);
+    set_function(L, "getupvalue", debug_getupvalue);
     set_function(L, "setupvalue", debug_setupvalue);
     set_function(L, "getproto", debug_getproto);
+    set_function(L, "getprotos", debug_getprotos);
     set_function(L, "getstack", debug_getstack);
+    set_function(L, "setstack", debug_setstack);
 
     mirror_debug(L, "getinfo");
     mirror_debug(L, "getconstants");
+    mirror_debug(L, "getconstant");
+    mirror_debug(L, "setconstant");
     mirror_debug(L, "getupvalues");
+    mirror_debug(L, "getupvalue");
     mirror_debug(L, "setupvalue");
     mirror_debug(L, "getproto");
+    mirror_debug(L, "getprotos");
     mirror_debug(L, "getstack");
+    mirror_debug(L, "setstack");
 
     drawing::install(L, set_function);
 
-    // The sandboxed globals start without _G; scripts expect it to be the
-    // executor environment, so alias it to our own global table.
+    // getgenv()._G is getgenv() itself, matching stock Luau where _G names the
+    // active global table. `shared` is one table for the whole VM.
     lua_pushvalue(L, LUA_GLOBALSINDEX);
     lua_setfield(L, LUA_GLOBALSINDEX, "_G");
+
+    lua_newtable(L);
+    lua_pushvalue(L, -1);
+    lua_setfield(L, LUA_GLOBALSINDEX, "shared");
+    lua_pop(L, 1);
+
+    // Put the per-chunk proxy back. The shared table remains anchored by the
+    // registry ref and, from now on, by the proxy metatable's __index.
+    lua_pushvalue(L, sandbox_index);
+    lua_replace(L, LUA_GLOBALSINDEX);
+    lua_settop(L, sandbox_index - 1);
 }
 
 void reset() {
+    g_genv_ref = LUA_NOREF;
+    g_genv_global = nullptr;
     g_renv_ref = LUA_NOREF;
     g_renv_global = nullptr;
+    g_http_get_ref = LUA_NOREF;
+    g_http_post_ref = LUA_NOREF;
+    g_game_ref = LUA_NOREF;
     g_own_closures.clear();
     g_hooks.clear();
     g_newc.clear();
     g_wrapped.clear();
+    g_namecall_frames.clear();
     g_signal_hooks.clear();
     g_hooked_connection_functions.clear();
     drawing::reset();

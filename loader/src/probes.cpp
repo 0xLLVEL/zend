@@ -178,7 +178,10 @@ dbg()
     }
     const BOOL r = g_Dbg ? g_Dbg() : FALSE;
 
-    det(DetSource::Hyperion, DetKind::DebugCheck, DetVerdict::Suspicious, ret(),
+    // Hyperion polls this every few seconds. Only a positive answer means a
+    // debugger is actually attached; the call itself is normal traffic.
+    det(DetSource::Hyperion, DetKind::DebugCheck,
+        r ? DetVerdict::Suspicious : DetVerdict::Observed, ret(),
         static_cast<std::uint64_t>(r));
     return r;
 }
@@ -304,10 +307,12 @@ __declspec(noinline) HANDLE WINAPI
 open(DWORD Access, BOOL Inherit, DWORD Pid)
 {
     const HANDLE r = g_Open ? g_Open(Access, Inherit, Pid) : nullptr;
-    const bool me = (Pid == GetCurrentProcessId());
 
-    det(DetSource::Hyperion, DetKind::ProcOpen, me ? DetVerdict::Suspicious : DetVerdict::Observed,
-        ret(), static_cast<std::uint64_t>(Pid), static_cast<std::uint64_t>(Access), at(r));
+    // Hyperion routinely opens its own process to scan memory; the call is
+    // normal traffic. Real risk shows up as SelfSeen when a module census
+    // reaches the loader, not here.
+    det(DetSource::Hyperion, DetKind::ProcOpen, DetVerdict::Observed, ret(),
+        static_cast<std::uint64_t>(Pid), static_cast<std::uint64_t>(Access), at(r));
     return r;
 }
 

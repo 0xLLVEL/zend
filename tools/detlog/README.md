@@ -48,8 +48,10 @@ u32 tid  u16 kind  u8 source  u8 verdict  u32 seq  u32 pad
 `heat` decays toward 0 over 30 s and saturates at 100. Only `Suspicious` (4)
 and `Confirmed` (20) events raise it; `Observed` events are normal client
 traffic (timing probes alone fire thousands of times per minute), so they are
-logged to the ring without moving the gauge. `drop` counts events suppressed by
-the 1 s repeat filter. `seq` is monotonic; the newest event is `seq == head - 1`.
+logged to the ring without moving the gauge. `drop` counts observed events
+suppressed by the 30 s per-caller repeat filter — timing probes alone fire too
+often to keep every call. `seq` is monotonic; the newest event is
+`seq == head - 1`.
 
 The offsets are duplicated in `tests/detlog-selftest.py`, which writes a
 synthetic ring and runs the reader over it. If `loader/include/emulator/detlog.h`

@@ -8,7 +8,7 @@ namespace emu {
 namespace {
 
 constexpr std::uint32_t kDecayMs = 30000u;
-constexpr std::uint64_t kRepeatMs = 1000u;
+constexpr std::uint64_t kRepeatMs = 30000u;
 constexpr std::size_t kSeenSlots = 128u;
 
 struct SeenSlot {

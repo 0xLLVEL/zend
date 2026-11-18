@@ -1,0 +1,39 @@
+{
+  "build": "4ea8e85481e34f46",
+  "client": "0.747.0.7471481",
+  "clientExe": {
+    "sha256": "ef4ba64486bf8324638b790fc011b9a33f61ee08e4066ad7e02c46df094bae2a",
+    "size": 145312208,
+    "imageSize": 155983872,
+    "entry": 155975684
+  },
+  "loader": {
+    "imageSize": 155983872,
+    "epOrig": 155975684,
+    "epNew": 100450076,
+    "textRva": 4096,
+    "textSize": 107046876,
+    "runtime": 150794240,
+    "rtCount": 277330,
+    "lua": 70073344,
+    "idJson": 49347600,
+    "imports": 900
+  },
+  "core": {
+    "fakeDataModel": "0x8F8E968",
+    "rawScheduler": "0x8F1E408",
+    "opcodeLookupTable": "0x7419400",
+    "getScriptVMState": "0x42D3B20",
+    "taskDefer": "0x43BAAD0",
+    "getCapabilities": "0x1D18C30",
+    "fireTouchInterest": "0x14D0000",
+    "fireProximityPrompt": "0x312A6F0",
+    "opcodeWireMultiplier": 227
+  },
+  "payload": {
+    "size": 110374844,
+    "sha256": "2d27024c6fa1cba76cf0487f2509be988aff07e7e106641b36c795a7dc0619df",
+    "text": 107046876,
+    "unwind": 3327960
+  }
+}

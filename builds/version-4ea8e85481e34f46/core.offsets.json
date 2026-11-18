@@ -1,0 +1,12 @@
+{
+  "build": "4ea8e85481e34f46",
+  "fakeDataModel": "0x8F8E968",
+  "rawScheduler": "0x8F1E408",
+  "opcodeLookupTable": "0x7419400",
+  "getScriptVMState": "0x42D3B20",
+  "taskDefer": "0x43BAAD0",
+  "getCapabilities": "0x1D18C30",
+  "fireTouchInterest": "0x14D0000",
+  "fireProximityPrompt": "0x312A6F0",
+  "opcodeWireMultiplier": 227
+}

@@ -1,0 +1,4585 @@
+{
+  "build": "4ea8e85481e34f46",
+  "dumper": {
+    "sourceSha256": "e07fc558ec7905691052dba80594fdbb9a663783a9b66b79895de042682a63c4",
+    "payloadSha256": "c8508cd2f8b175484b1a35283cee6d331bfa672105acda88cffc39092f51fb5c"
+  },
+  "image": {
+    "size": 155983872,
+    "entry": 155975684,
+    "decryptedSize": 156024832,
+    "restoredEntry": 100450448,
+    "clientEntry": 100450076,
+    "checksum": 156043748
+  },
+  "text": {
+    "rva": 4096,
+    "size": 107046876,
+    "mapSize": 107048960,
+    "pad": 2084
+  },
+  "unwind": {
+    "rva": 150794240,
+    "count": 277330,
+    "size": 3327960
+  },
+  "lua": 70073344,
+  "idJson": 49347600,
+  "proxyImport": {
+    "module": "RobloxPlayerBeta.dll",
+    "symbol": "run",
+    "slot": "0x94C1242"
+  },
+  "imports": [
+    {
+      "module": "WebView2Loader.dll",
+      "symbol": "GetAvailableCoreWebView2BrowserVersionString",
+      "slot": "0x661A9D8"
+    },
+    {
+      "module": "WebView2Loader.dll",
+      "symbol": "CompareBrowserVersions",
+      "slot": "0x661A9E0"
+    },
+    {
+      "module": "WebView2Loader.dll",
+      "symbol": "CreateCoreWebView2EnvironmentWithOptions",
+      "slot": "0x661A9E8"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "gethostbyname",
+      "slot": "0x661A800"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "inet_pton",
+      "slot": "0x661A808"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "htonl",
+      "slot": "0x661A810"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "htons",
+      "slot": "0x661A818"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "ntohs",
+      "slot": "0x661A820"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "getaddrinfo",
+      "slot": "0x661A828"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "freeaddrinfo",
+      "slot": "0x661A830"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSAEventSelect",
+      "slot": "0x661A838"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "inet_ntop",
+      "slot": "0x661A840"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "ntohl",
+      "slot": "0x661A848"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSAStartup",
+      "slot": "0x661A850"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSACleanup",
+      "slot": "0x661A858"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "closesocket",
+      "slot": "0x661A860"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "setsockopt",
+      "slot": "0x661A868"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "getsockopt",
+      "slot": "0x661A870"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "ioctlsocket",
+      "slot": "0x661A878"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "socket",
+      "slot": "0x661A880"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "connect",
+      "slot": "0x661A888"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "getpeername",
+      "slot": "0x661A890"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSACloseEvent",
+      "slot": "0x661A898"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSACreateEvent",
+      "slot": "0x661A8A0"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "recv",
+      "slot": "0x661A8A8"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "send",
+      "slot": "0x661A8B0"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "getsockname",
+      "slot": "0x661A8B8"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "bind",
+      "slot": "0x661A8C0"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "listen",
+      "slot": "0x661A8C8"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "accept",
+      "slot": "0x661A8D0"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSARecvFrom",
+      "slot": "0x661A8D8"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSAGetLastError",
+      "slot": "0x661A8E0"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSASendMsg",
+      "slot": "0x661A8E8"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "sendto",
+      "slot": "0x661A8F0"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "select",
+      "slot": "0x661A8F8"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSARecv",
+      "slot": "0x661A900"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSASendTo",
+      "slot": "0x661A908"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSAGetOverlappedResult",
+      "slot": "0x661A910"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSASocketW",
+      "slot": "0x661A918"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "shutdown",
+      "slot": "0x661A920"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSASend",
+      "slot": "0x661A928"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSAIoctl",
+      "slot": "0x661A930"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSASetLastError",
+      "slot": "0x661A938"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSAPoll",
+      "slot": "0x661A940"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "__WSAFDIsSet",
+      "slot": "0x661A948"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "recvfrom",
+      "slot": "0x661A950"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSAResetEvent",
+      "slot": "0x661A958"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSAWaitForMultipleEvents",
+      "slot": "0x661A960"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "GetAddrInfoExCancel",
+      "slot": "0x661A968"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "FreeAddrInfoExW",
+      "slot": "0x661A970"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "GetAddrInfoExW",
+      "slot": "0x661A978"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSAEnumNetworkEvents",
+      "slot": "0x661A980"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "inet_addr",
+      "slot": "0x661A988"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "inet_ntoa",
+      "slot": "0x661A990"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "gethostbyaddr",
+      "slot": "0x661A998"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "getservbyport",
+      "slot": "0x661A9A0"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "getservbyname",
+      "slot": "0x661A9A8"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSASocketA",
+      "slot": "0x661A9B0"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "gethostname",
+      "slot": "0x661A9B8"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "getnameinfo",
+      "slot": "0x661A9C0"
+    },
+    {
+      "module": "WS2_32.dll",
+      "symbol": "WSASetEvent",
+      "slot": "0x661A9C8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateMutexW",
+      "slot": "0x66193F0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateFileMappingW",
+      "slot": "0x66193F8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateProcessW",
+      "slot": "0x6619400"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetPriorityClass",
+      "slot": "0x6619408"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetProcessInformation",
+      "slot": "0x6619410"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "K32EmptyWorkingSet",
+      "slot": "0x6619418"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetThreadId",
+      "slot": "0x6619420"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "LocalAlloc",
+      "slot": "0x6619428"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "LocalFree",
+      "slot": "0x6619430"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "WaitForThreadpoolTimerCallbacks",
+      "slot": "0x6619438"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CloseThreadpoolTimer",
+      "slot": "0x6619440"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetThreadpoolTimer",
+      "slot": "0x6619448"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateThreadpoolTimer",
+      "slot": "0x6619450"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetEnvironmentVariableW",
+      "slot": "0x6619458"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetFileAttributesW",
+      "slot": "0x6619460"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "LoadLibraryW",
+      "slot": "0x6619468"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateThread",
+      "slot": "0x6619470"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetTickCount",
+      "slot": "0x6619478"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FindResourceExA",
+      "slot": "0x6619480"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FindResourceW",
+      "slot": "0x6619488"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateFileW",
+      "slot": "0x6619490"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetTickCount64",
+      "slot": "0x6619498"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "WriteConsoleW",
+      "slot": "0x66194A0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateDirectoryW",
+      "slot": "0x66194A8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FindFirstFileW",
+      "slot": "0x66194B0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetFullPathNameW",
+      "slot": "0x66194B8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FindNextFileW",
+      "slot": "0x66194C0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "DeviceIoControl",
+      "slot": "0x66194C8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "RemoveDirectoryW",
+      "slot": "0x66194D0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetFileTime",
+      "slot": "0x66194D8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetEndOfFile",
+      "slot": "0x66194E0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetTempPathW",
+      "slot": "0x66194E8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FindClose",
+      "slot": "0x66194F0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetFileAttributesW",
+      "slot": "0x66194F8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetFileInformationByHandle",
+      "slot": "0x6619500"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetFileAttributesExW",
+      "slot": "0x6619508"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "DeleteFileW",
+      "slot": "0x6619510"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetCurrentDirectoryW",
+      "slot": "0x6619518"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetFilePointerEx",
+      "slot": "0x6619520"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "MoveFileExW",
+      "slot": "0x6619528"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CopyFileW",
+      "slot": "0x6619530"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetFileTime",
+      "slot": "0x6619538"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetWaitableTimer",
+      "slot": "0x6619540"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "WaitForMultipleObjectsEx",
+      "slot": "0x6619548"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "TlsSetValue",
+      "slot": "0x6619550"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ResumeThread",
+      "slot": "0x6619558"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetLogicalProcessorInformation",
+      "slot": "0x6619560"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "TlsAlloc",
+      "slot": "0x6619568"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateWaitableTimerA",
+      "slot": "0x6619570"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SystemTimeToFileTime",
+      "slot": "0x6619578"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "TlsGetValue",
+      "slot": "0x6619580"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "TlsFree",
+      "slot": "0x6619588"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "AreFileApisANSI",
+      "slot": "0x6619590"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetNativeSystemInfo",
+      "slot": "0x6619598"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetThreadPriority",
+      "slot": "0x66195A0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateSemaphoreA",
+      "slot": "0x66195A8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SleepConditionVariableCS",
+      "slot": "0x66195B0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "WakeConditionVariable",
+      "slot": "0x66195B8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "InitializeConditionVariable",
+      "slot": "0x66195C0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "WakeAllConditionVariable",
+      "slot": "0x66195C8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "lstrlenW",
+      "slot": "0x66195D0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "lstrcpyW",
+      "slot": "0x66195D8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetConsoleMode",
+      "slot": "0x66195E0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetFileType",
+      "slot": "0x66195E8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetHandleInformation",
+      "slot": "0x66195F0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateIoCompletionPort",
+      "slot": "0x66195F8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetFileCompletionNotificationModes",
+      "slot": "0x6619600"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetErrorMode",
+      "slot": "0x6619608"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetQueuedCompletionStatus",
+      "slot": "0x6619610"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "PostQueuedCompletionStatus",
+      "slot": "0x6619618"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CancelIo",
+      "slot": "0x6619620"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "RegisterWaitForSingleObject",
+      "slot": "0x6619628"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "UnregisterWait",
+      "slot": "0x6619630"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CancelIoEx",
+      "slot": "0x6619638"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SwitchToThread",
+      "slot": "0x6619640"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ReadFile",
+      "slot": "0x6619648"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetNamedPipeHandleState",
+      "slot": "0x6619650"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateNamedPipeW",
+      "slot": "0x6619658"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "InitializeCriticalSection",
+      "slot": "0x6619660"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "PeekNamedPipe",
+      "slot": "0x6619668"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "DuplicateHandle",
+      "slot": "0x6619670"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "QueueUserWorkItem",
+      "slot": "0x6619678"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CancelSynchronousIo",
+      "slot": "0x6619680"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetNamedPipeHandleStateA",
+      "slot": "0x6619688"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateFileA",
+      "slot": "0x6619690"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetCurrentThread",
+      "slot": "0x6619698"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "WaitNamedPipeW",
+      "slot": "0x66196A0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ConnectNamedPipe",
+      "slot": "0x66196A8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FlushFileBuffers",
+      "slot": "0x66196B0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "TerminateProcess",
+      "slot": "0x66196B8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "OpenProcess",
+      "slot": "0x66196C0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "UnregisterWaitEx",
+      "slot": "0x66196C8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "LCMapStringW",
+      "slot": "0x66196D0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetExitCodeProcess",
+      "slot": "0x66196D8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetConsoleCtrlHandler",
+      "slot": "0x66196E0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetLongPathNameW",
+      "slot": "0x66196E8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ReadDirectoryChangesW",
+      "slot": "0x66196F0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetConsoleTextAttribute",
+      "slot": "0x66196F8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetConsoleMode",
+      "slot": "0x6619700"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetConsoleCursorInfo",
+      "slot": "0x6619708"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetConsoleCursorInfo",
+      "slot": "0x6619710"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FillConsoleOutputCharacterW",
+      "slot": "0x6619718"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ReadConsoleInputW",
+      "slot": "0x6619720"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ReadConsoleW",
+      "slot": "0x6619728"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "WriteConsoleInputW",
+      "slot": "0x6619730"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FillConsoleOutputAttribute",
+      "slot": "0x6619738"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetNumberOfConsoleInputEvents",
+      "slot": "0x6619740"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetConsoleCursorPosition",
+      "slot": "0x6619748"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "Process32First",
+      "slot": "0x6619750"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "VerifyVersionInfoA",
+      "slot": "0x6619758"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetEnvironmentVariableW",
+      "slot": "0x6619760"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FreeEnvironmentStringsW",
+      "slot": "0x6619768"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateToolhelp32Snapshot",
+      "slot": "0x6619770"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "K32GetProcessMemoryInfo",
+      "slot": "0x6619778"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FileTimeToSystemTime",
+      "slot": "0x6619780"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "Process32Next",
+      "slot": "0x6619788"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "VerSetConditionMask",
+      "slot": "0x6619790"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GlobalMemoryStatusEx",
+      "slot": "0x6619798"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetEnvironmentStringsW",
+      "slot": "0x66197A0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "TryEnterCriticalSection",
+      "slot": "0x66197A8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "TryAcquireSRWLockExclusive",
+      "slot": "0x66197B0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ReleaseSRWLockShared",
+      "slot": "0x66197B8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "AcquireSRWLockShared",
+      "slot": "0x66197C0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetFileInformationByHandleEx",
+      "slot": "0x66197C8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetFileSizeEx",
+      "slot": "0x66197D0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetFinalPathNameByHandleW",
+      "slot": "0x66197D8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FlushViewOfFile",
+      "slot": "0x66197E0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetStartupInfoW",
+      "slot": "0x66197E8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetFileSize",
+      "slot": "0x66197F0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "HeapCreate",
+      "slot": "0x66197F8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "UnlockFileEx",
+      "slot": "0x6619800"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "HeapValidate",
+      "slot": "0x6619808"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "HeapSize",
+      "slot": "0x6619810"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "HeapReAlloc",
+      "slot": "0x6619818"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetOverlappedResult",
+      "slot": "0x6619820"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "HeapCompact",
+      "slot": "0x6619828"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "HeapDestroy",
+      "slot": "0x6619830"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "LockFileEx",
+      "slot": "0x6619838"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetDriveTypeW",
+      "slot": "0x6619840"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "LoadLibraryExW",
+      "slot": "0x6619848"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetProcessAffinityMask",
+      "slot": "0x6619850"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetThreadAffinityMask",
+      "slot": "0x6619858"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetFilePointer",
+      "slot": "0x6619860"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetSystemDirectoryA",
+      "slot": "0x6619868"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetVersionExA",
+      "slot": "0x6619870"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetSystemPowerStatus",
+      "slot": "0x6619878"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "QueryFullProcessImageNameW",
+      "slot": "0x6619880"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "K32GetProcessImageFileNameA",
+      "slot": "0x6619888"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetPhysicallyInstalledSystemMemory",
+      "slot": "0x6619890"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateEventW",
+      "slot": "0x6619898"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "RtlLookupFunctionEntry",
+      "slot": "0x66198A0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "K32EnumProcessModules",
+      "slot": "0x66198A8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "K32GetModuleInformation",
+      "slot": "0x66198B0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "K32GetModuleBaseNameA",
+      "slot": "0x66198B8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetThreadDescription",
+      "slot": "0x66198C0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SuspendThread",
+      "slot": "0x66198C8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetThreadContext",
+      "slot": "0x66198D0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "OpenThread",
+      "slot": "0x66198D8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SleepEx",
+      "slot": "0x66198E0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "MoveFileExA",
+      "slot": "0x66198E8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "VerifyVersionInfoW",
+      "slot": "0x66198F0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CompareFileTime",
+      "slot": "0x66198F8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetThreadTimes",
+      "slot": "0x6619900"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "RtlAddFunctionTable",
+      "slot": "0x6619908"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GlobalUnlock",
+      "slot": "0x6619910"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FlushInstructionCache",
+      "slot": "0x6619918"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "RtlCaptureContext",
+      "slot": "0x6619920"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "RtlVirtualUnwind",
+      "slot": "0x6619928"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "UnhandledExceptionFilter",
+      "slot": "0x6619930"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetSystemTime",
+      "slot": "0x6619938"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "PrefetchVirtualMemory",
+      "slot": "0x6619940"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetLocaleInfoW",
+      "slot": "0x6619948"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetTempFileNameW",
+      "slot": "0x6619950"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "Process32FirstW",
+      "slot": "0x6619958"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "Process32NextW",
+      "slot": "0x6619960"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "InitializeSListHead",
+      "slot": "0x6619968"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "InterlockedPopEntrySList",
+      "slot": "0x6619970"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CloseThreadpool",
+      "slot": "0x6619978"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CloseThreadpoolCleanupGroup",
+      "slot": "0x6619980"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateThreadpool",
+      "slot": "0x6619988"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetThreadpoolThreadMaximum",
+      "slot": "0x6619990"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetThreadpoolThreadMinimum",
+      "slot": "0x6619998"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateThreadpoolCleanupGroup",
+      "slot": "0x66199A0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateThreadpoolWork",
+      "slot": "0x66199A8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CloseThreadpoolCleanupGroupMembers",
+      "slot": "0x66199B0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "QueryUnbiasedInterruptTime",
+      "slot": "0x66199B8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SubmitThreadpoolWork",
+      "slot": "0x66199C0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "InterlockedPushEntrySList",
+      "slot": "0x66199C8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetOverlappedResultEx",
+      "slot": "0x66199D0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetUnhandledExceptionFilter",
+      "slot": "0x66199D8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetLocalTime",
+      "slot": "0x66199E0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "AddVectoredExceptionHandler",
+      "slot": "0x66199E8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetExitCodeThread",
+      "slot": "0x66199F0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetVersion",
+      "slot": "0x66199F8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "RemoveVectoredExceptionHandler",
+      "slot": "0x6619A00"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "TransactNamedPipe",
+      "slot": "0x6619A08"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FindFirstFileExW",
+      "slot": "0x6619A10"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetSystemFirmwareTable",
+      "slot": "0x6619A18"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CompareStringEx",
+      "slot": "0x6619A20"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetTimeFormatEx",
+      "slot": "0x6619A28"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetDateFormatEx",
+      "slot": "0x6619A30"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetUserDefaultLocaleName",
+      "slot": "0x6619A38"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "IsProcessorFeaturePresent",
+      "slot": "0x6619A40"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetDiskFreeSpaceExW",
+      "slot": "0x6619A48"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetFileInformationByHandle",
+      "slot": "0x6619A50"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetStringTypeW",
+      "slot": "0x6619A58"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "RtlPcToFileHeader",
+      "slot": "0x6619A60"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "InitOnceComplete",
+      "slot": "0x6619A68"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "InitOnceBeginInitialize",
+      "slot": "0x6619A70"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SleepConditionVariableSRW",
+      "slot": "0x6619A78"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetLocaleInfoEx",
+      "slot": "0x6619A80"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FlsAlloc",
+      "slot": "0x6619A88"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FlsGetValue",
+      "slot": "0x6619A90"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FlsSetValue",
+      "slot": "0x6619A98"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FlsFree",
+      "slot": "0x6619AA0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FreeLibraryWhenCallbackReturns",
+      "slot": "0x6619AA8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CloseThreadpoolWork",
+      "slot": "0x6619AB0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "EncodePointer",
+      "slot": "0x6619AB8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "LCMapStringEx",
+      "slot": "0x6619AC0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetCPInfo",
+      "slot": "0x6619AC8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "RtlUnwindEx",
+      "slot": "0x6619AD0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "RtlUnwind",
+      "slot": "0x6619AD8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "InitializeCriticalSectionAndSpinCount",
+      "slot": "0x6619AE0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetCommandLineA",
+      "slot": "0x6619AE8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetCommandLineW",
+      "slot": "0x6619AF0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ExitThread",
+      "slot": "0x6619AF8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FreeLibraryAndExitThread",
+      "slot": "0x6619B00"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SystemTimeToTzSpecificLocalTime",
+      "slot": "0x6619B08"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetStdHandle",
+      "slot": "0x6619B10"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetConsoleOutputCP",
+      "slot": "0x6619B18"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetTimeZoneInformation",
+      "slot": "0x6619B20"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetDateFormatW",
+      "slot": "0x6619B28"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetTimeFormatW",
+      "slot": "0x6619B30"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CompareStringW",
+      "slot": "0x6619B38"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "IsValidLocale",
+      "slot": "0x6619B40"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetUserDefaultLCID",
+      "slot": "0x6619B48"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "EnumSystemLocalesW",
+      "slot": "0x6619B50"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "IsValidCodePage",
+      "slot": "0x6619B58"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetACP",
+      "slot": "0x6619B60"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetOEMCP",
+      "slot": "0x6619B68"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "MapViewOfFile",
+      "slot": "0x6619B70"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ResetEvent",
+      "slot": "0x6619B78"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GlobalFree",
+      "slot": "0x6619B80"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GlobalAlloc",
+      "slot": "0x6619B88"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "LockResource",
+      "slot": "0x6619B90"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "UnmapViewOfFile",
+      "slot": "0x6619B98"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "lstrcmpA",
+      "slot": "0x6619BA0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateMutexA",
+      "slot": "0x6619BA8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "WaitForMultipleObjects",
+      "slot": "0x6619BB0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "OutputDebugStringA",
+      "slot": "0x6619BB8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetGeoInfoA",
+      "slot": "0x6619BC0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GlobalHandle",
+      "slot": "0x6619BC8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "IsDebuggerPresent",
+      "slot": "0x6619BD0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "lstrcmpW",
+      "slot": "0x6619BD8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "DebugBreak",
+      "slot": "0x6619BE0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetSystemTimeAsFileTime",
+      "slot": "0x6619BE8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "lstrcmpiA",
+      "slot": "0x6619BF0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "WideCharToMultiByte",
+      "slot": "0x6619BF8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetModuleHandleW",
+      "slot": "0x6619C00"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetProcessHeap",
+      "slot": "0x6619C08"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetCurrentProcessId",
+      "slot": "0x6619C10"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ExitProcess",
+      "slot": "0x6619C18"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "DeleteCriticalSection",
+      "slot": "0x6619C20"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateMutexExW",
+      "slot": "0x6619C28"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "DecodePointer",
+      "slot": "0x6619C30"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "HeapAlloc",
+      "slot": "0x6619C38"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "LoadResource",
+      "slot": "0x6619C40"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "IsDBCSLeadByte",
+      "slot": "0x6619C48"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "RaiseException",
+      "slot": "0x6619C50"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "OpenSemaphoreW",
+      "slot": "0x6619C58"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "WaitForSingleObjectEx",
+      "slot": "0x6619C60"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetEvent",
+      "slot": "0x6619C68"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "OutputDebugStringW",
+      "slot": "0x6619C70"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FormatMessageW",
+      "slot": "0x6619C78"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "MultiByteToWideChar",
+      "slot": "0x6619C80"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetModuleHandleA",
+      "slot": "0x6619C88"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ReleaseMutex",
+      "slot": "0x6619C90"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetCurrentThreadId",
+      "slot": "0x6619C98"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "WaitForSingleObject",
+      "slot": "0x6619CA0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FindResourceA",
+      "slot": "0x6619CA8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "InitializeCriticalSectionEx",
+      "slot": "0x6619CB0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "LeaveCriticalSection",
+      "slot": "0x6619CB8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "K32GetModuleFileNameExW",
+      "slot": "0x6619CC0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetModuleFileNameW",
+      "slot": "0x6619CC8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "LoadLibraryExA",
+      "slot": "0x6619CD0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetModuleHandleExW",
+      "slot": "0x6619CD8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ReleaseSemaphore",
+      "slot": "0x6619CE0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "EnterCriticalSection",
+      "slot": "0x6619CE8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetLastError",
+      "slot": "0x6619CF0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "HeapFree",
+      "slot": "0x6619CF8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateSemaphoreExW",
+      "slot": "0x6619D00"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SizeofResource",
+      "slot": "0x6619D08"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateEventA",
+      "slot": "0x6619D10"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FormatMessageA",
+      "slot": "0x6619D18"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateFileMappingA",
+      "slot": "0x6619D20"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "AttachConsole",
+      "slot": "0x6619D28"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "OpenEventA",
+      "slot": "0x6619D30"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetModuleFileNameA",
+      "slot": "0x6619D38"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetProcessTimes",
+      "slot": "0x6619D40"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "VirtualQuery",
+      "slot": "0x6619D48"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "QueryPerformanceCounter",
+      "slot": "0x6619D50"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "FreeLibrary",
+      "slot": "0x6619D58"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetProcAddress",
+      "slot": "0x6619D60"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetCurrentProcessorNumber",
+      "slot": "0x6619D68"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetSystemInfo",
+      "slot": "0x6619D70"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CloseHandle",
+      "slot": "0x6619D78"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "QueryPerformanceFrequency",
+      "slot": "0x6619D80"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "LoadLibraryA",
+      "slot": "0x6619D88"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "AcquireSRWLockExclusive",
+      "slot": "0x6619D90"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ReleaseSRWLockExclusive",
+      "slot": "0x6619D98"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetLastError",
+      "slot": "0x6619DA0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "Sleep",
+      "slot": "0x6619DA8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetEnvironmentVariableA",
+      "slot": "0x6619DB0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "VirtualAlloc",
+      "slot": "0x6619DB8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "WriteFile",
+      "slot": "0x6619DC0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "WriteConsoleA",
+      "slot": "0x6619DC8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetStdHandle",
+      "slot": "0x6619DD0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetCurrentProcess",
+      "slot": "0x6619DD8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "VirtualFree",
+      "slot": "0x6619DE0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "QueueUserAPC",
+      "slot": "0x6619DE8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "lstrcpynW",
+      "slot": "0x6619DF0"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ReadConsoleA",
+      "slot": "0x6619DF8"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SwitchToFiber",
+      "slot": "0x6619E00"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "DeleteFiber",
+      "slot": "0x6619E08"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateFiberEx",
+      "slot": "0x6619E10"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ConvertFiberToThread",
+      "slot": "0x6619E18"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "ConvertThreadToFiberEx",
+      "slot": "0x6619E20"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetFileAttributesA",
+      "slot": "0x6619E28"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateSemaphoreW",
+      "slot": "0x6619E30"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "CreateFile2",
+      "slot": "0x6619E38"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "MulDiv",
+      "slot": "0x6619E40"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GlobalLock",
+      "slot": "0x6619E48"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "InitializeSRWLock",
+      "slot": "0x6619E50"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "VirtualProtect",
+      "slot": "0x6619E58"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetConsoleScreenBufferInfo",
+      "slot": "0x6619E60"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "SetCurrentDirectoryW",
+      "slot": "0x6619E68"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "RtlDeleteFunctionTable",
+      "slot": "0x6619E70"
+    },
+    {
+      "module": "KERNEL32.dll",
+      "symbol": "GetUserGeoID",
+      "slot": "0x6619E78"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegSetValueExA",
+      "slot": "0x6619000"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "LookupPrivilegeValueA",
+      "slot": "0x6619008"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "AdjustTokenPrivileges",
+      "slot": "0x6619010"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegEnumKeyExA",
+      "slot": "0x6619018"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegDeleteValueA",
+      "slot": "0x6619020"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegOpenKeyExA",
+      "slot": "0x6619028"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegCreateKeyExA",
+      "slot": "0x6619030"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegDeleteKeyA",
+      "slot": "0x6619038"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegQueryInfoKeyW",
+      "slot": "0x6619040"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegCloseKey",
+      "slot": "0x6619048"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegQueryValueExA",
+      "slot": "0x6619050"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegDeleteValueW",
+      "slot": "0x6619058"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptGenRandom",
+      "slot": "0x6619060"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegOpenKeyExW",
+      "slot": "0x6619068"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "DeregisterEventSource",
+      "slot": "0x6619070"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegSetValueExW",
+      "slot": "0x6619078"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegisterEventSourceW",
+      "slot": "0x6619080"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegGetValueW",
+      "slot": "0x6619088"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "ReportEventW",
+      "slot": "0x6619090"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptSetHashParam",
+      "slot": "0x6619098"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptGetProvParam",
+      "slot": "0x66190A0"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptGetUserKey",
+      "slot": "0x66190A8"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptExportKey",
+      "slot": "0x66190B0"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptDecrypt",
+      "slot": "0x66190B8"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "FreeSid",
+      "slot": "0x66190C0"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "AllocateAndInitializeSid",
+      "slot": "0x66190C8"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptSignHashW",
+      "slot": "0x66190D0"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegQueryValueExW",
+      "slot": "0x66190D8"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "SystemFunction036",
+      "slot": "0x66190E0"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "GetTokenInformation",
+      "slot": "0x66190E8"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "GetSidSubAuthority",
+      "slot": "0x66190F0"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "GetSidSubAuthorityCount",
+      "slot": "0x66190F8"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegEnumValueW",
+      "slot": "0x6619100"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegQueryInfoKeyA",
+      "slot": "0x6619108"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegEnumKeyExW",
+      "slot": "0x6619110"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptEnumProvidersW",
+      "slot": "0x6619118"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptAcquireContextA",
+      "slot": "0x6619120"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptImportKey",
+      "slot": "0x6619128"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptDestroyKey",
+      "slot": "0x6619130"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptReleaseContext",
+      "slot": "0x6619138"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptCreateHash",
+      "slot": "0x6619140"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptHashData",
+      "slot": "0x6619148"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptVerifySignatureA",
+      "slot": "0x6619150"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptDestroyHash",
+      "slot": "0x6619158"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptAcquireContextW",
+      "slot": "0x6619160"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "CryptGetHashParam",
+      "slot": "0x6619168"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "BuildSecurityDescriptorW",
+      "slot": "0x6619170"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "BuildExplicitAccessWithNameW",
+      "slot": "0x6619178"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+      "slot": "0x6619180"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "RegCreateKeyExW",
+      "slot": "0x6619188"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "EqualSid",
+      "slot": "0x6619190"
+    },
+    {
+      "module": "ADVAPI32.dll",
+      "symbol": "OpenProcessToken",
+      "slot": "0x6619198"
+    },
+    {
+      "module": "d3d11.dll",
+      "symbol": "D3D11CreateDevice",
+      "slot": "0x661AA80"
+    },
+    {
+      "module": "dxgi.dll",
+      "symbol": "CreateDXGIFactory",
+      "slot": "0x661AAE0"
+    },
+    {
+      "module": "EVR.dll",
+      "symbol": "MFCreateVideoSampleFromSurface",
+      "slot": "0x6619288"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "ChoosePixelFormat",
+      "slot": "0x6619298"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "SwapBuffers",
+      "slot": "0x66192A0"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "CreateRoundRectRgn",
+      "slot": "0x66192A8"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "CreateDIBSection",
+      "slot": "0x66192B0"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "CreateFontW",
+      "slot": "0x66192B8"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "DescribePixelFormat",
+      "slot": "0x66192C0"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "CreateBitmap",
+      "slot": "0x66192C8"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "SetPixelFormat",
+      "slot": "0x66192D0"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "GetStockObject",
+      "slot": "0x66192D8"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "GetObjectA",
+      "slot": "0x66192E0"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "CreateSolidBrush",
+      "slot": "0x66192E8"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "DeleteObject",
+      "slot": "0x66192F0"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "DeleteDC",
+      "slot": "0x66192F8"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "GetDeviceCaps",
+      "slot": "0x6619300"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "CreateCompatibleDC",
+      "slot": "0x6619308"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "SelectObject",
+      "slot": "0x6619310"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "CreateCompatibleBitmap",
+      "slot": "0x6619318"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "BitBlt",
+      "slot": "0x6619320"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "CreateRectRgnIndirect",
+      "slot": "0x6619328"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "FillRgn",
+      "slot": "0x6619330"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "SetTextColor",
+      "slot": "0x6619338"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "SetBkColor",
+      "slot": "0x6619340"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "CreateDCA",
+      "slot": "0x6619348"
+    },
+    {
+      "module": "GDI32.dll",
+      "symbol": "CombineRgn",
+      "slot": "0x6619350"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveInReset",
+      "slot": "0x661A738"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveInUnprepareHeader",
+      "slot": "0x661A740"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveOutGetDevCapsW",
+      "slot": "0x661A748"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveOutClose",
+      "slot": "0x661A750"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveInGetDevCapsW",
+      "slot": "0x661A758"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveOutReset",
+      "slot": "0x661A760"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveInOpen",
+      "slot": "0x661A768"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveOutOpen",
+      "slot": "0x661A770"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveOutPrepareHeader",
+      "slot": "0x661A778"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveInStart",
+      "slot": "0x661A780"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveInAddBuffer",
+      "slot": "0x661A788"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveOutGetPosition",
+      "slot": "0x661A790"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "timeGetTime",
+      "slot": "0x661A798"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveInGetNumDevs",
+      "slot": "0x661A7A0"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveInPrepareHeader",
+      "slot": "0x661A7A8"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveOutWrite",
+      "slot": "0x661A7B0"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveOutGetNumDevs",
+      "slot": "0x661A7B8"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveInClose",
+      "slot": "0x661A7C0"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "timeBeginPeriod",
+      "slot": "0x661A7C8"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "timeEndPeriod",
+      "slot": "0x661A7D0"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "timeGetDevCaps",
+      "slot": "0x661A7D8"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "timeSetEvent",
+      "slot": "0x661A7E0"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "timeKillEvent",
+      "slot": "0x661A7E8"
+    },
+    {
+      "module": "WINMM.dll",
+      "symbol": "waveOutUnprepareHeader",
+      "slot": "0x661A7F0"
+    },
+    {
+      "module": "MFPlat.DLL",
+      "symbol": "MFCreateMediaType",
+      "slot": "0x6619E88"
+    },
+    {
+      "module": "MFPlat.DLL",
+      "symbol": "MFCreateSample",
+      "slot": "0x6619E90"
+    },
+    {
+      "module": "MFPlat.DLL",
+      "symbol": "MFCreateAlignedMemoryBuffer",
+      "slot": "0x6619E98"
+    },
+    {
+      "module": "MFPlat.DLL",
+      "symbol": "MFCreateMemoryBuffer",
+      "slot": "0x6619EA0"
+    },
+    {
+      "module": "MFPlat.DLL",
+      "symbol": "MFStartup",
+      "slot": "0x6619EA8"
+    },
+    {
+      "module": "MFPlat.DLL",
+      "symbol": "MFShutdown",
+      "slot": "0x6619EB0"
+    },
+    {
+      "module": "MFPlat.DLL",
+      "symbol": "MFCreateAttributes",
+      "slot": "0x6619EB8"
+    },
+    {
+      "module": "MFPlat.DLL",
+      "symbol": "MFCreateDXGIDeviceManager",
+      "slot": "0x6619EC0"
+    },
+    {
+      "module": "MFPlat.DLL",
+      "symbol": "MFCreateDXGISurfaceBuffer",
+      "slot": "0x6619EC8"
+    },
+    {
+      "module": "MFPlat.DLL",
+      "symbol": "MFTEnumEx",
+      "slot": "0x6619ED0"
+    },
+    {
+      "module": "OLEAUT32.dll",
+      "symbol": "LoadTypeLib",
+      "slot": "0x6619F18"
+    },
+    {
+      "module": "OLEAUT32.dll",
+      "symbol": "SysFreeString",
+      "slot": "0x6619F20"
+    },
+    {
+      "module": "OLEAUT32.dll",
+      "symbol": "SysStringLen",
+      "slot": "0x6619F28"
+    },
+    {
+      "module": "OLEAUT32.dll",
+      "symbol": "VarUI4FromStr",
+      "slot": "0x6619F30"
+    },
+    {
+      "module": "OLEAUT32.dll",
+      "symbol": "LoadRegTypeLib",
+      "slot": "0x6619F38"
+    },
+    {
+      "module": "OLEAUT32.dll",
+      "symbol": "OleCreateFontIndirect",
+      "slot": "0x6619F40"
+    },
+    {
+      "module": "OLEAUT32.dll",
+      "symbol": "VariantInit",
+      "slot": "0x6619F48"
+    },
+    {
+      "module": "OLEAUT32.dll",
+      "symbol": "SysAllocStringLen",
+      "slot": "0x6619F50"
+    },
+    {
+      "module": "OLEAUT32.dll",
+      "symbol": "VariantClear",
+      "slot": "0x6619F58"
+    },
+    {
+      "module": "OLEAUT32.dll",
+      "symbol": "OleCreatePropertyFrame",
+      "slot": "0x6619F60"
+    },
+    {
+      "module": "OLEAUT32.dll",
+      "symbol": "SysStringByteLen",
+      "slot": "0x6619F68"
+    },
+    {
+      "module": "OLEAUT32.dll",
+      "symbol": "SysAllocStringByteLen",
+      "slot": "0x6619F70"
+    },
+    {
+      "module": "OLEAUT32.dll",
+      "symbol": "SysAllocString",
+      "slot": "0x6619F78"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "IsWindow",
+      "slot": "0x661A178"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "CreateDialogIndirectParamA",
+      "slot": "0x661A180"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetClassNameA",
+      "slot": "0x661A188"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetDlgItem",
+      "slot": "0x661A190"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetWindowTextW",
+      "slot": "0x661A198"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetClassInfoExA",
+      "slot": "0x661A1A0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "FillRect",
+      "slot": "0x661A1A8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "PostMessageA",
+      "slot": "0x661A1B0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "RegisterPowerSettingNotification",
+      "slot": "0x661A1B8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetDesktopWindow",
+      "slot": "0x661A1C0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetWindowTextLengthA",
+      "slot": "0x661A1C8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "MonitorFromWindow",
+      "slot": "0x661A1D0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetWindowPos",
+      "slot": "0x661A1D8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetDC",
+      "slot": "0x661A1E0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "DestroyWindow",
+      "slot": "0x661A1E8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetFocus",
+      "slot": "0x661A1F0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetWindowRect",
+      "slot": "0x661A1F8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetWindow",
+      "slot": "0x661A200"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "IsTouchWindow",
+      "slot": "0x661A208"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "ShowWindowAsync",
+      "slot": "0x661A210"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetParent",
+      "slot": "0x661A218"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "RegisterClassExA",
+      "slot": "0x661A220"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SendMessageTimeoutA",
+      "slot": "0x661A228"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "RegisterWindowMessageA",
+      "slot": "0x661A230"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "FindWindowW",
+      "slot": "0x661A238"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetCapture",
+      "slot": "0x661A240"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "ReleaseCapture",
+      "slot": "0x661A248"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "PostThreadMessageW",
+      "slot": "0x661A250"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetLayeredWindowAttributes",
+      "slot": "0x661A258"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "RegisterClassW",
+      "slot": "0x661A260"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetCursorPos",
+      "slot": "0x661A268"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetCursor",
+      "slot": "0x661A270"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "DestroyIcon",
+      "slot": "0x661A278"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "MonitorFromPoint",
+      "slot": "0x661A280"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "LoadImageW",
+      "slot": "0x661A288"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "DrawIconEx",
+      "slot": "0x661A290"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "TrackMouseEvent",
+      "slot": "0x661A298"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetWindowLongPtrW",
+      "slot": "0x661A2A0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "RedrawWindow",
+      "slot": "0x661A2A8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "InvalidateRect",
+      "slot": "0x661A2B0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "ReleaseDC",
+      "slot": "0x661A2B8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "BeginPaint",
+      "slot": "0x661A2C0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "EndPaint",
+      "slot": "0x661A2C8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "IsIconic",
+      "slot": "0x661A2D0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetForegroundWindow",
+      "slot": "0x661A2D8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "UpdateWindow",
+      "slot": "0x661A2E0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetWindowLongPtrW",
+      "slot": "0x661A2E8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "CopyRect",
+      "slot": "0x661A2F0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetWindowContextHelpId",
+      "slot": "0x661A2F8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "IsDialogMessageA",
+      "slot": "0x661A300"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "MapDialogRect",
+      "slot": "0x661A308"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "EndDialog",
+      "slot": "0x661A310"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetWindowLongA",
+      "slot": "0x661A318"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "ChangeDisplaySettingsExA",
+      "slot": "0x661A320"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetWindowPlacement",
+      "slot": "0x661A328"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "ClientToScreen",
+      "slot": "0x661A330"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetWindowLongW",
+      "slot": "0x661A338"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "CharNextA",
+      "slot": "0x661A340"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetWindowRgn",
+      "slot": "0x661A348"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetMessageW",
+      "slot": "0x661A350"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "LoadIconA",
+      "slot": "0x661A358"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "CallWindowProcA",
+      "slot": "0x661A360"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetActiveWindow",
+      "slot": "0x661A368"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "RealGetWindowClassA",
+      "slot": "0x661A370"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "IsWindowVisible",
+      "slot": "0x661A378"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "AdjustWindowRectEx",
+      "slot": "0x661A380"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "DefWindowProcW",
+      "slot": "0x661A388"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetSystemMenu",
+      "slot": "0x661A390"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "LoadBitmapA",
+      "slot": "0x661A398"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetKeyboardLayoutList",
+      "slot": "0x661A3A0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetKeyboardLayout",
+      "slot": "0x661A3A8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "LoadKeyboardLayoutA",
+      "slot": "0x661A3B0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "ActivateKeyboardLayout",
+      "slot": "0x661A3B8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "RegisterRawInputDevices",
+      "slot": "0x661A3C0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "UnloadKeyboardLayout",
+      "slot": "0x661A3C8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "CloseClipboard",
+      "slot": "0x661A3D0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "DestroyAcceleratorTable",
+      "slot": "0x661A3D8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetClipboardData",
+      "slot": "0x661A3E0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetRawInputData",
+      "slot": "0x661A3E8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetDoubleClickTime",
+      "slot": "0x661A3F0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "MapVirtualKeyA",
+      "slot": "0x661A3F8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetKeyboardState",
+      "slot": "0x661A400"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "ToUnicode",
+      "slot": "0x661A408"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetCursorPos",
+      "slot": "0x661A410"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "ClipCursor",
+      "slot": "0x661A418"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetRect",
+      "slot": "0x661A420"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "WindowFromPoint",
+      "slot": "0x661A428"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "PtInRect",
+      "slot": "0x661A430"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetTouchInputInfo",
+      "slot": "0x661A438"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "CloseTouchInputHandle",
+      "slot": "0x661A440"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetRawInputDeviceList",
+      "slot": "0x661A448"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "DestroyCursor",
+      "slot": "0x661A450"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "PostMessageW",
+      "slot": "0x661A458"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "UpdateLayeredWindow",
+      "slot": "0x661A460"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetCapture",
+      "slot": "0x661A468"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "EnableWindow",
+      "slot": "0x661A470"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetKeyboardLayoutNameW",
+      "slot": "0x661A478"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "CreateIconIndirect",
+      "slot": "0x661A480"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetClassLongPtrA",
+      "slot": "0x661A488"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetClassLongPtrA",
+      "slot": "0x661A490"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "EnumDisplayDevicesA",
+      "slot": "0x661A498"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "EnumDisplaySettingsA",
+      "slot": "0x661A4A0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "LoadCursorA",
+      "slot": "0x661A4A8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetWindowTextA",
+      "slot": "0x661A4B0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "IsChild",
+      "slot": "0x661A4B8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "UnregisterDeviceNotification",
+      "slot": "0x661A4C0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "MessageBoxW",
+      "slot": "0x661A4C8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "DispatchMessageA",
+      "slot": "0x661A4D0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "MapVirtualKeyW",
+      "slot": "0x661A4D8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetMessageA",
+      "slot": "0x661A4E0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetWindowLongPtrA",
+      "slot": "0x661A4E8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetMonitorInfoW",
+      "slot": "0x661A4F0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "EnumDisplayDevicesW",
+      "slot": "0x661A4F8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetRawInputBuffer",
+      "slot": "0x661A500"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "MapVirtualKeyExA",
+      "slot": "0x661A508"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "EnumDisplaySettingsExA",
+      "slot": "0x661A510"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetDpiForWindow",
+      "slot": "0x661A518"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "RegisterWindowMessageW",
+      "slot": "0x661A520"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "PostQuitMessage",
+      "slot": "0x661A528"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "CreateWindowExW",
+      "slot": "0x661A530"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "CreateAcceleratorTableA",
+      "slot": "0x661A538"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "UnregisterPowerSettingNotification",
+      "slot": "0x661A540"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "MapWindowPoints",
+      "slot": "0x661A548"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SystemParametersInfoA",
+      "slot": "0x661A550"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "UnregisterClassA",
+      "slot": "0x661A558"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetPointerDevices",
+      "slot": "0x661A560"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "ScreenToClient",
+      "slot": "0x661A568"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SendMessageW",
+      "slot": "0x661A570"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetSystemMetrics",
+      "slot": "0x661A578"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "RegisterClassExW",
+      "slot": "0x661A580"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetWindowPlacement",
+      "slot": "0x661A588"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "TrackPopupMenu",
+      "slot": "0x661A590"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "EmptyClipboard",
+      "slot": "0x661A598"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetClipboardData",
+      "slot": "0x661A5A0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "LoadStringW",
+      "slot": "0x661A5A8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "ShowWindow",
+      "slot": "0x661A5B0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetWindowThreadProcessId",
+      "slot": "0x661A5B8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "RegisterDeviceNotificationW",
+      "slot": "0x661A5C0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "DispatchMessageW",
+      "slot": "0x661A5C8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetClassInfoExW",
+      "slot": "0x661A5D0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "LoadCursorW",
+      "slot": "0x661A5D8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "CallWindowProcW",
+      "slot": "0x661A5E0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "FindWindowExW",
+      "slot": "0x661A5E8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "RegisterTouchWindow",
+      "slot": "0x661A5F0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetWindowLongA",
+      "slot": "0x661A5F8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "PeekMessageW",
+      "slot": "0x661A600"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetAsyncKeyState",
+      "slot": "0x661A608"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetRectEmpty",
+      "slot": "0x661A610"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetProcessWindowStation",
+      "slot": "0x661A618"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetUserObjectInformationW",
+      "slot": "0x661A620"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "PeekMessageA",
+      "slot": "0x661A628"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "PostThreadMessageA",
+      "slot": "0x661A630"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "MsgWaitForMultipleObjectsEx",
+      "slot": "0x661A638"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetShellWindow",
+      "slot": "0x661A640"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SendMessageA",
+      "slot": "0x661A648"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetWindowTextA",
+      "slot": "0x661A650"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetMonitorInfoA",
+      "slot": "0x661A658"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetSysColor",
+      "slot": "0x661A660"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "MessageBoxA",
+      "slot": "0x661A668"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetForegroundWindow",
+      "slot": "0x661A670"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetFocus",
+      "slot": "0x661A678"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "TranslateMessage",
+      "slot": "0x661A680"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "LoadIconW",
+      "slot": "0x661A688"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetWindowLongPtrA",
+      "slot": "0x661A690"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "KillTimer",
+      "slot": "0x661A698"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "MoveWindow",
+      "slot": "0x661A6A0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "InvalidateRgn",
+      "slot": "0x661A6A8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "SetTimer",
+      "slot": "0x661A6B0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "IsZoomed",
+      "slot": "0x661A6B8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetClientRect",
+      "slot": "0x661A6C0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetSystemMetricsForDpi",
+      "slot": "0x661A6C8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "CreateWindowExA",
+      "slot": "0x661A6D0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "UnregisterClassW",
+      "slot": "0x661A6D8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "OpenClipboard",
+      "slot": "0x661A6E0"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "GetRawInputDeviceInfoA",
+      "slot": "0x661A6E8"
+    },
+    {
+      "module": "USER32.dll",
+      "symbol": "DefWindowProcA",
+      "slot": "0x661A6F0"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "CoTaskMemAlloc",
+      "slot": "0x661AC98"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "CoCreateInstance",
+      "slot": "0x661ACA0"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "CoTaskMemFree",
+      "slot": "0x661ACA8"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "CoTaskMemRealloc",
+      "slot": "0x661ACB0"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "CoGetClassObject",
+      "slot": "0x661ACB8"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "OleUninitialize",
+      "slot": "0x661ACC0"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "StringFromGUID2",
+      "slot": "0x661ACC8"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "CLSIDFromProgID",
+      "slot": "0x661ACD0"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "CreateStreamOnHGlobal",
+      "slot": "0x661ACD8"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "CLSIDFromString",
+      "slot": "0x661ACE0"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "OleInitialize",
+      "slot": "0x661ACE8"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "OleLockRunning",
+      "slot": "0x661ACF0"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "CoUninitialize",
+      "slot": "0x661ACF8"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "CoInitializeEx",
+      "slot": "0x661AD00"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "CoInitialize",
+      "slot": "0x661AD08"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "PropVariantClear",
+      "slot": "0x661AD10"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "CoCreateGuid",
+      "slot": "0x661AD18"
+    },
+    {
+      "module": "ole32.dll",
+      "symbol": "StringFromCLSID",
+      "slot": "0x661AD20"
+    },
+    {
+      "module": "SHELL32.dll",
+      "symbol": "ILFree",
+      "slot": "0x661A100"
+    },
+    {
+      "module": "SHELL32.dll",
+      "symbol": "SHOpenFolderAndSelectItems",
+      "slot": "0x661A108"
+    },
+    {
+      "module": "SHELL32.dll",
+      "symbol": "ILCreateFromPathW",
+      "slot": "0x661A110"
+    },
+    {
+      "module": "SHELL32.dll",
+      "symbol": "SetCurrentProcessExplicitAppUserModelID",
+      "slot": "0x661A118"
+    },
+    {
+      "module": "SHELL32.dll",
+      "symbol": "SHGetFolderPathAndSubDirW",
+      "slot": "0x661A120"
+    },
+    {
+      "module": "SHELL32.dll",
+      "symbol": "Shell_NotifyIconW",
+      "slot": "0x661A128"
+    },
+    {
+      "module": "SHELL32.dll",
+      "symbol": "ShellExecuteW",
+      "slot": "0x661A130"
+    },
+    {
+      "module": "SHELL32.dll",
+      "symbol": "SHGetKnownFolderPath",
+      "slot": "0x661A138"
+    },
+    {
+      "module": "SHELL32.dll",
+      "symbol": "ShellExecuteA",
+      "slot": "0x661A140"
+    },
+    {
+      "module": "SHELL32.dll",
+      "symbol": "SHQueryUserNotificationState",
+      "slot": "0x661A148"
+    },
+    {
+      "module": "SHLWAPI.dll",
+      "symbol": "PathFindFileNameA",
+      "slot": "0x661A158"
+    },
+    {
+      "module": "SHLWAPI.dll",
+      "symbol": "PathFindFileNameW",
+      "slot": "0x661A160"
+    },
+    {
+      "module": "SHLWAPI.dll",
+      "symbol": "SHCreateMemStream",
+      "slot": "0x661A168"
+    },
+    {
+      "module": "KERNELBASE.dll",
+      "symbol": "PathCchRemoveFileSpec",
+      "slot": "0x661A9F8"
+    },
+    {
+      "module": "KERNELBASE.dll",
+      "symbol": "PathCchCombineEx",
+      "slot": "0x661AA00"
+    },
+    {
+      "module": "KERNELBASE.dll",
+      "symbol": "WakeByAddressSingle",
+      "slot": "0x661AA28"
+    },
+    {
+      "module": "KERNELBASE.dll",
+      "symbol": "WaitOnAddress",
+      "slot": "0x661AA30"
+    },
+    {
+      "module": "IPHLPAPI.DLL",
+      "symbol": "if_nametoindex",
+      "slot": "0x66193B0"
+    },
+    {
+      "module": "IPHLPAPI.DLL",
+      "symbol": "GetAdaptersAddresses",
+      "slot": "0x66193B8"
+    },
+    {
+      "module": "IPHLPAPI.DLL",
+      "symbol": "IcmpParseReplies",
+      "slot": "0x66193C0"
+    },
+    {
+      "module": "IPHLPAPI.DLL",
+      "symbol": "IcmpSendEcho2",
+      "slot": "0x66193C8"
+    },
+    {
+      "module": "IPHLPAPI.DLL",
+      "symbol": "IcmpCreateFile",
+      "slot": "0x66193D0"
+    },
+    {
+      "module": "IPHLPAPI.DLL",
+      "symbol": "IcmpCloseHandle",
+      "slot": "0x66193D8"
+    },
+    {
+      "module": "IPHLPAPI.DLL",
+      "symbol": "GetBestInterface",
+      "slot": "0x66193E0"
+    },
+    {
+      "module": "COMCTL32.dll",
+      "symbol": "ImageList_Create",
+      "slot": "0x66191A8"
+    },
+    {
+      "module": "COMCTL32.dll",
+      "symbol": "RemoveWindowSubclass",
+      "slot": "0x66191B0"
+    },
+    {
+      "module": "COMCTL32.dll",
+      "symbol": "ImageList_AddMasked",
+      "slot": "0x66191B8"
+    },
+    {
+      "module": "COMCTL32.dll",
+      "symbol": "SetWindowSubclass",
+      "slot": "0x66191C0"
+    },
+    {
+      "module": "COMCTL32.dll",
+      "symbol": "DefSubclassProc",
+      "slot": "0x66191C8"
+    },
+    {
+      "module": "VERSION.dll",
+      "symbol": "GetFileVersionInfoExW",
+      "slot": "0x661A700"
+    },
+    {
+      "module": "VERSION.dll",
+      "symbol": "VerQueryValueW",
+      "slot": "0x661A708"
+    },
+    {
+      "module": "VERSION.dll",
+      "symbol": "GetFileVersionInfoSizeExW",
+      "slot": "0x661A710"
+    },
+    {
+      "module": "POWRPROF.dll",
+      "symbol": "CallNtPowerInformation",
+      "slot": "0x661AA70"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CryptMsgGetParam",
+      "slot": "0x66191E8"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CryptQueryObject",
+      "slot": "0x66191F0"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CertGetNameStringW",
+      "slot": "0x66191F8"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CryptDecodeObjectEx",
+      "slot": "0x6619200"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CertOpenStore",
+      "slot": "0x6619208"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CryptUnprotectData",
+      "slot": "0x6619210"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CryptProtectData",
+      "slot": "0x6619218"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CryptMsgClose",
+      "slot": "0x6619220"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CertEnumCertificatesInStore",
+      "slot": "0x6619228"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CertDuplicateCertificateContext",
+      "slot": "0x6619230"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CertFreeCertificateContext",
+      "slot": "0x6619238"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CertGetEnhancedKeyUsage",
+      "slot": "0x6619240"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CertOpenSystemStoreA",
+      "slot": "0x6619248"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CertGetCertificateContextProperty",
+      "slot": "0x6619250"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CertFindCertificateInStore",
+      "slot": "0x6619258"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CertOpenSystemStoreW",
+      "slot": "0x6619260"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CertCloseStore",
+      "slot": "0x6619268"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CryptStringToBinaryA",
+      "slot": "0x6619270"
+    },
+    {
+      "module": "CRYPT32.dll",
+      "symbol": "CertGetIntendedKeyUsage",
+      "slot": "0x6619278"
+    },
+    {
+      "module": "COMDLG32.dll",
+      "symbol": "GetOpenFileNameA",
+      "slot": "0x66191D8"
+    },
+    {
+      "module": "combase.dll",
+      "symbol": "RoUninitialize",
+      "slot": "0x661AA40"
+    },
+    {
+      "module": "combase.dll",
+      "symbol": "RoInitialize",
+      "slot": "0x661AA48"
+    },
+    {
+      "module": "combase.dll",
+      "symbol": "RoActivateInstance",
+      "slot": "0x661AA50"
+    },
+    {
+      "module": "combase.dll",
+      "symbol": "WindowsCreateStringReference",
+      "slot": "0x661AA60"
+    },
+    {
+      "module": "MSACM32.dll",
+      "symbol": "acmFormatSuggest",
+      "slot": "0x6619EE0"
+    },
+    {
+      "module": "MSACM32.dll",
+      "symbol": "acmStreamOpen",
+      "slot": "0x6619EE8"
+    },
+    {
+      "module": "MSACM32.dll",
+      "symbol": "acmStreamPrepareHeader",
+      "slot": "0x6619EF0"
+    },
+    {
+      "module": "MSACM32.dll",
+      "symbol": "acmStreamUnprepareHeader",
+      "slot": "0x6619EF8"
+    },
+    {
+      "module": "MSACM32.dll",
+      "symbol": "acmStreamConvert",
+      "slot": "0x6619F00"
+    },
+    {
+      "module": "MSACM32.dll",
+      "symbol": "acmStreamSize",
+      "slot": "0x6619F08"
+    },
+    {
+      "module": "WININET.dll",
+      "symbol": "InternetSetOptionA",
+      "slot": "0x661A720"
+    },
+    {
+      "module": "WININET.dll",
+      "symbol": "InternetGetCookieExA",
+      "slot": "0x661A728"
+    },
+    {
+      "module": "twinapi.appcore.dll",
+      "symbol": "UnregisterAppStateChangeNotification",
+      "slot": "0x661AA10"
+    },
+    {
+      "module": "twinapi.appcore.dll",
+      "symbol": "RegisterAppStateChangeNotification",
+      "slot": "0x661AA18"
+    },
+    {
+      "module": "dwmapi.dll",
+      "symbol": "DwmSetWindowAttribute",
+      "slot": "0x661AAC8"
+    },
+    {
+      "module": "dwmapi.dll",
+      "symbol": "DwmGetWindowAttribute",
+      "slot": "0x661AAD0"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipCreateStringFormat",
+      "slot": "0x661AAF0"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipFillEllipseI",
+      "slot": "0x661AAF8"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipSetSmoothingMode",
+      "slot": "0x661AB00"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipDisposeImage",
+      "slot": "0x661AB08"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipGetImageGraphicsContext",
+      "slot": "0x661AB10"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipSetInterpolationMode",
+      "slot": "0x661AB18"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipDrawImageRectI",
+      "slot": "0x661AB20"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipCloneImage",
+      "slot": "0x661AB28"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipSetStringFormatLineAlign",
+      "slot": "0x661AB30"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipCreateSolidFill",
+      "slot": "0x661AB38"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipCreateBitmapFromStream",
+      "slot": "0x661AB40"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipCreateBitmapFromScan0",
+      "slot": "0x661AB48"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipCreateBitmapFromHICON",
+      "slot": "0x661AB50"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipGetImageEncodersSize",
+      "slot": "0x661AB58"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipGetImageEncoders",
+      "slot": "0x661AB60"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipSetStringFormatTrimming",
+      "slot": "0x661AB68"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipCreatePath",
+      "slot": "0x661AB70"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipDeletePath",
+      "slot": "0x661AB78"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipSaveImageToStream",
+      "slot": "0x661AB80"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipDeleteBrush",
+      "slot": "0x661AB88"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipClosePathFigure",
+      "slot": "0x661AB90"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipAddPathArc",
+      "slot": "0x661AB98"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipDrawString",
+      "slot": "0x661ABA0"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipSetStringFormatAlign",
+      "slot": "0x661ABA8"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipDeleteFont",
+      "slot": "0x661ABB0"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipFree",
+      "slot": "0x661ABB8"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipGetGenericFontFamilySansSerif",
+      "slot": "0x661ABC0"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipCreateFont",
+      "slot": "0x661ABC8"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipAlloc",
+      "slot": "0x661ABD0"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipCreateFontFamilyFromName",
+      "slot": "0x661ABD8"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipDeleteFontFamily",
+      "slot": "0x661ABE0"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdiplusShutdown",
+      "slot": "0x661ABE8"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdiplusStartup",
+      "slot": "0x661ABF0"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipDrawLineI",
+      "slot": "0x661ABF8"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipCreateFromHDC",
+      "slot": "0x661AC00"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipCreatePen1",
+      "slot": "0x661AC08"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipDeletePen",
+      "slot": "0x661AC10"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipDeleteStringFormat",
+      "slot": "0x661AC18"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipDeleteGraphics",
+      "slot": "0x661AC20"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipSetTextRenderingHint",
+      "slot": "0x661AC28"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipDrawPath",
+      "slot": "0x661AC30"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipPrivateAddFontFile",
+      "slot": "0x661AC38"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipDeletePrivateFontCollection",
+      "slot": "0x661AC40"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipNewPrivateFontCollection",
+      "slot": "0x661AC48"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipCloneFontFamily",
+      "slot": "0x661AC50"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipGetFontCollectionFamilyList",
+      "slot": "0x661AC58"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipMeasureString",
+      "slot": "0x661AC60"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipFillPath",
+      "slot": "0x661AC68"
+    },
+    {
+      "module": "gdiplus.dll",
+      "symbol": "GdipGraphicsClear",
+      "slot": "0x661AC70"
+    },
+    {
+      "module": "IMM32.dll",
+      "symbol": "ImmSetOpenStatus",
+      "slot": "0x6619360"
+    },
+    {
+      "module": "IMM32.dll",
+      "symbol": "ImmGetConversionStatus",
+      "slot": "0x6619368"
+    },
+    {
+      "module": "IMM32.dll",
+      "symbol": "ImmGetOpenStatus",
+      "slot": "0x6619370"
+    },
+    {
+      "module": "IMM32.dll",
+      "symbol": "ImmReleaseContext",
+      "slot": "0x6619378"
+    },
+    {
+      "module": "IMM32.dll",
+      "symbol": "ImmSetCompositionWindow",
+      "slot": "0x6619380"
+    },
+    {
+      "module": "IMM32.dll",
+      "symbol": "ImmGetContext",
+      "slot": "0x6619388"
+    },
+    {
+      "module": "IMM32.dll",
+      "symbol": "ImmGetCompositionStringA",
+      "slot": "0x6619390"
+    },
+    {
+      "module": "IMM32.dll",
+      "symbol": "ImmGetDefaultIMEWnd",
+      "slot": "0x6619398"
+    },
+    {
+      "module": "IMM32.dll",
+      "symbol": "ImmGetCompositionStringW",
+      "slot": "0x66193A0"
+    },
+    {
+      "module": "dbghelp.dll",
+      "symbol": "SymGetModuleBase64",
+      "slot": "0x661AA90"
+    },
+    {
+      "module": "dbghelp.dll",
+      "symbol": "SymFunctionTableAccess64",
+      "slot": "0x661AA98"
+    },
+    {
+      "module": "dbghelp.dll",
+      "symbol": "StackWalk64",
+      "slot": "0x661AAA0"
+    },
+    {
+      "module": "dbghelp.dll",
+      "symbol": "SymGetSymFromAddr64",
+      "slot": "0x661AAA8"
+    },
+    {
+      "module": "dbghelp.dll",
+      "symbol": "SymFromAddr",
+      "slot": "0x661AAB0"
+    },
+    {
+      "module": "dbghelp.dll",
+      "symbol": "SymGetLineFromAddr64",
+      "slot": "0x661AAB8"
+    },
+    {
+      "module": "msdmo.dll",
+      "symbol": "MoFreeMediaType",
+      "slot": "0x661AC80"
+    },
+    {
+      "module": "msdmo.dll",
+      "symbol": "MoInitMediaType",
+      "slot": "0x661AC88"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glTexSubImage2D",
+      "slot": "0x6619F88"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glGetTexImage",
+      "slot": "0x6619F90"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glTexParameteri",
+      "slot": "0x6619F98"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glTexImage2D",
+      "slot": "0x6619FA0"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glReadPixels",
+      "slot": "0x6619FA8"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glDrawArrays",
+      "slot": "0x6619FB0"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glDrawElements",
+      "slot": "0x6619FB8"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glClear",
+      "slot": "0x6619FC0"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glClearStencil",
+      "slot": "0x6619FC8"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glClearDepth",
+      "slot": "0x6619FD0"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glClearColor",
+      "slot": "0x6619FD8"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glStencilMask",
+      "slot": "0x6619FE0"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glStencilOp",
+      "slot": "0x6619FE8"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glStencilFunc",
+      "slot": "0x6619FF0"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glDepthMask",
+      "slot": "0x6619FF8"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glCullFace",
+      "slot": "0x661A000"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glTexParameterfv",
+      "slot": "0x661A008"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glTexParameterf",
+      "slot": "0x661A010"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glGetError",
+      "slot": "0x661A018"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glGetString",
+      "slot": "0x661A020"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glGetIntegerv",
+      "slot": "0x661A028"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glScissor",
+      "slot": "0x661A030"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glGenTextures",
+      "slot": "0x661A038"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glViewport",
+      "slot": "0x661A040"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glBindTexture",
+      "slot": "0x661A048"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glDeleteTextures",
+      "slot": "0x661A050"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "wglGetCurrentContext",
+      "slot": "0x661A058"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glEnable",
+      "slot": "0x661A060"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glDisable",
+      "slot": "0x661A068"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glReadBuffer",
+      "slot": "0x661A070"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glCopyTexSubImage2D",
+      "slot": "0x661A078"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glPolygonMode",
+      "slot": "0x661A080"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "wglGetProcAddress",
+      "slot": "0x661A088"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "wglDeleteContext",
+      "slot": "0x661A090"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glPolygonOffset",
+      "slot": "0x661A098"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glColorMask",
+      "slot": "0x661A0A0"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glBlendFunc",
+      "slot": "0x661A0A8"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "wglMakeCurrent",
+      "slot": "0x661A0B0"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glDepthFunc",
+      "slot": "0x661A0B8"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "glPixelStorei",
+      "slot": "0x661A0C0"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "wglGetCurrentDC",
+      "slot": "0x661A0C8"
+    },
+    {
+      "module": "OPENGL32.dll",
+      "symbol": "wglCreateContext",
+      "slot": "0x661A0D0"
+    },
+    {
+      "module": "SETUPAPI.dll",
+      "symbol": "CM_Locate_DevNodeA",
+      "slot": "0x661A0E0"
+    },
+    {
+      "module": "SETUPAPI.dll",
+      "symbol": "CM_Get_Parent",
+      "slot": "0x661A0E8"
+    },
+    {
+      "module": "SETUPAPI.dll",
+      "symbol": "CM_Get_Device_IDA",
+      "slot": "0x661A0F0"
+    }
+  ],
+  "tls": [
+    "0x71B800",
+    "0x5FCB890",
+    "0x5FCBCE0",
+    "0x71B810"
+  ],
+  "sites": {
+    "lua_rva": "0x42D3C00",
+    "png_rva": "0x49DDE92",
+    "identity_rva": "0x2F0FC10",
+    "tray_spawn": "0x7A9A32",
+    "tray_close": "0x76B8D8",
+    "tray_close_target": "0x76B9DA",
+    "mux_rva": "0x865D9D8",
+    "proxy_rva": "0x8328BE8"
+  },
+  "patches": {
+    "lua": [
+      64,
+      83,
+      72,
+      131,
+      236,
+      48,
+      72,
+      139,
+      218,
+      72
+    ],
+    "png": [
+      68,
+      139,
+      109,
+      175,
+      69,
+      11,
+      234
+    ],
+    "traySpawn": [
+      255,
+      21,
+      200,
+      249,
+      230,
+      5
+    ],
+    "trayClose": [
+      15,
+      132,
+      252,
+      0,
+      0,
+      0
+    ]
+  }
+}

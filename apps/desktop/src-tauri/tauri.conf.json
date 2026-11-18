@@ -1,0 +1,58 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ZEND",
+  "version": "0.1.0",
+  "identifier": "dev.zend.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "ZEND",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 1080,
+        "minHeight": 660,
+        "center": true,
+        "resizable": true,
+        "decorations": false,
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "ZEND",
+    "copyright": "Copyright (c) 2026 ZEND",
+    "category": "DeveloperTool",
+    "shortDescription": "ZEND desktop shell",
+    "longDescription": "ZEND desktop shell: script editor, hub, and executor control surface. Roblox is launched separately through the loader.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "installer-hooks.nsh",
+        "languages": ["English"],
+        "displayLanguageSelector": false,
+        "compression": "lzma"
+      }
+    }
+  }
+}

@@ -1,0 +1,43 @@
+# reference material (large, local only)
+/sample/
+/emulator/
+
+# build output
+/build/
+/target/
+**/target/
+/dist/
+
+# node
+node_modules/
+npm-debug.log*
+
+# rust
+**/*.rs.bk
+
+# visual studio
+.vs/
+*.user
+*.suo
+*.pdb
+*.ilk
+*.obj
+
+# runtime
+**/zend/runtime/
+**/logs/
+
+# generated per-build payload archives (tools/repack)
+builds/**/payload.7z
+
+# os
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# client dump artifacts (local reference)
+/dump/
+
+# AI working notes (local only)
+/PLAN.md
+/readme-ai.md

@@ -1,0 +1,36 @@
+#include <winres.h>
+#include "resource.h"
+
+#if @ZEND_HAS_PAYLOAD@
+IDR_PAYLOAD RCDATA "@ZEND_PAYLOAD_7Z@"
+#endif
+
+1 VERSIONINFO
+ FILEVERSION 1, 1, 4, 0
+ PRODUCTVERSION 1, 1, 4, 0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE 0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "Author", "Roblox Corporation\0"
+            VALUE "CompanyName", "Roblox Corporation\0"
+            VALUE "FileDescription", "Roblox Application\0"
+            VALUE "FileVersion", "@ZEND_CLIENT_VERSION@\0"
+            VALUE "InternalName", "RobloxPlayerBeta\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Roblox Corporation\0"
+            VALUE "OriginalFilename", "RobloxPlayerBeta.dll\0"
+            VALUE "ProductName", "Roblox\0"
+            VALUE "ProductVersion", "@ZEND_CLIENT_VERSION@\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

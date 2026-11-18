@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zend.dev/protocol/v1.json",
+  "title": "ZEND protocol v1",
+  "type": "object",
+  "required": ["v", "op"],
+  "properties": {
+    "v": { "const": 1 },
+    "id": { "type": "integer", "minimum": 1 },
+    "op": {
+      "enum": [
+        "hello",
+        "exec",
+        "result",
+        "status",
+        "status.result",
+        "log",
+        "toast",
+        "ping",
+        "pong",
+        "detach"
+      ]
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/hello" },
+    { "$ref": "#/$defs/exec" },
+    { "$ref": "#/$defs/result" },
+    { "$ref": "#/$defs/status" },
+    { "$ref": "#/$defs/statusResult" },
+    { "$ref": "#/$defs/log" },
+    { "$ref": "#/$defs/toast" },
+    { "$ref": "#/$defs/ping" },
+    { "$ref": "#/$defs/pong" },
+    { "$ref": "#/$defs/detach" }
+  ],
+  "$defs": {
+    "hello": {
+      "properties": {
+        "op": { "const": "hello" },
+        "token": { "type": "string" },
+        "pid": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["op", "token", "pid"]
+    },
+    "exec": {
+      "properties": {
+        "op": { "const": "exec" },
+        "id": { "type": "integer" },
+        "source": { "type": "string" },
+        "chunk": { "type": "string" }
+      },
+      "required": ["op", "id", "source", "chunk"]
+    },
+    "result": {
+      "properties": {
+        "op": { "const": "result" },
+        "id": { "type": "integer" },
+        "ok": { "type": "boolean" },
+        "output": { "type": "string" },
+        "error": { "type": ["string", "null"] },
+        "ms": { "type": "number", "minimum": 0 }
+      },
+      "required": ["op", "id", "ok", "output", "error", "ms"]
+    },
+    "status": {
+      "properties": {
+        "op": { "const": "status" },
+        "id": { "type": "integer" }
+      },
+      "required": ["op", "id"]
+    },
+    "statusResult": {
+      "properties": {
+        "op": { "const": "status.result" },
+        "id": { "type": "integer" },
+        "build": { "type": "string" },
+        "attached": { "type": "boolean" },
+        "place_id": { "type": "integer" },
+        "queue": { "type": "integer", "minimum": 0 },
+        "heat": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["op", "id", "build", "attached", "place_id", "queue", "heat"]
+    },
+    "log": {
+      "properties": {
+        "op": { "const": "log" },
+        "level": { "enum": ["info", "warn", "error", "debug"] },
+        "msg": { "type": "string" },
+        "ts": { "type": "integer" }
+      },
+      "required": ["op", "level", "msg", "ts"]
+    },
+    "toast": {
+      "properties": {
+        "op": { "const": "toast" },
+        "title": { "type": "string" },
+        "content": { "type": "string" },
+        "kind": { "enum": ["info", "success", "error"] }
+      },
+      "required": ["op", "title", "content", "kind"]
+    },
+    "ping": {
+      "properties": {
+        "op": { "const": "ping" },
+        "id": { "type": "integer" }
+      },
+      "required": ["op"]
+    },
+    "pong": {
+      "properties": {
+        "op": { "const": "pong" },
+        "id": { "type": "integer" }
+      },
+      "required": ["op"]
+    },
+    "detach": {
+      "properties": {
+        "op": { "const": "detach" },
+        "id": { "type": "integer" }
+      },
+      "required": ["op", "id"]
+    }
+  }
+}

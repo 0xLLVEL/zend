@@ -1,6 +1,6 @@
 {
   "version": "0.1.0",
-  "url": "",
+  "url": "https://github.com/0xLLVEL/zend/releases/download/v0.1.0/ZEND_0.1.0_x64-setup.exe",
   "published": "2026-11-18",
-  "notes": "Current public release. Future entries point at the newest installer."
+  "notes": "Per-user installer; attaches to a running Roblox session."
 }

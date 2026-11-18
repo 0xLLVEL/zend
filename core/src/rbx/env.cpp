@@ -4052,7 +4052,9 @@ http = {
 -- without changing the shared instance metatable that every other object uses.
 do
     local mt = getrawmetatable(game)
-    if type(mt) == "table" and not rawget(mt, "__zend_game_methods") then
+    if type(mt) == "table" and type(mt.__index) == "function" and
+        type(mt.__namecall) == "function" and
+        not rawget(mt, "__zend_game_methods") then
         local old_index = mt.__index
         local old_namecall = mt.__namecall
         local clone = {}
@@ -4077,7 +4079,7 @@ do
             end
             return old_namecall(self, ...)
         end
-        setrawmetatable(game, clone)
+        pcall(setrawmetatable, game, clone)
     end
 end
 )LUA";

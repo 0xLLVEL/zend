@@ -1,4 +1,4 @@
-# Core import audit. Fails when module.dll grows an import from PLAN.md §8.
+# Core import audit. Fails when module.dll grows a forbidden import.
 #
 # The static CRT drags in a small set of Kernel32 imports for unwind/abort
 # handling. Those are allowlisted below and are not called from core sources;
@@ -34,17 +34,38 @@ $forbidden = @(
 )
 
 # Kernel32 imports that the statically linked CRT needs for unwind and abort.
-# They are dormant unless the core throws or aborts; see PLAN.md §8.
+# They are dormant unless the core throws or aborts.
 $crtAllow = @(
     "VirtualProtect",
     "RtlLookupFunctionEntry"
 )
 
-$dumpbin = Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022" `
-    -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -like "*Hostx64\x64*" } |
-    Select-Object -First 1 -ExpandProperty FullName
+function Find-Dumpbin {
+    $onPath = Get-Command dumpbin.exe -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty Source
+    if ($onPath) { return $onPath }
 
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $found = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -find "VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe" 2>$null |
+            Select-Object -First 1
+        if ($found -and (Test-Path $found)) { return $found }
+    }
+
+    $roots = @("${env:ProgramFiles}\Microsoft Visual Studio", "${env:ProgramFiles(x86)}\Microsoft Visual Studio")
+    foreach ($rootDir in $roots) {
+        if (!(Test-Path $rootDir)) { continue }
+        $found = Get-ChildItem $rootDir -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like "*Hostx64\x64*" } |
+            Select-Object -First 1 -ExpandProperty FullName
+        if ($found) { return $found }
+    }
+    return $null
+}
+
+$dumpbin = Find-Dumpbin
 if (!$dumpbin) { throw "dumpbin.exe not found (Visual Studio x64 tools)" }
 
 $imports = (& $dumpbin /nologo /imports $Binary | Out-String)

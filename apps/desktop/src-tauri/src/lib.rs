@@ -1,4 +1,5 @@
 mod core;
+mod update;
 
 use std::sync::Arc;
 
@@ -152,7 +153,9 @@ pub fn run() {
             core_exec,
             core_connect,
             core_detach,
-            core_set_pipe
+            core_set_pipe,
+            update::update_check,
+            update::update_open
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

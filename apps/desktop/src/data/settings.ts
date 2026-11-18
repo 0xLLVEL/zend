@@ -10,6 +10,7 @@ export interface Settings {
   autoexecOnAttach: boolean;
   injectDelay: number;
   pipeName: string;
+  updateFeed: string;
   accent: Accent;
   topmost: boolean;
   channel: Channel;
@@ -31,6 +32,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoexecOnAttach: true,
   injectDelay: 1000,
   pipeName: "",
+  updateFeed: "https://raw.githubusercontent.com/0xLLVEL/zend/main/updates.json",
   accent: "ember",
   topmost: false,
   channel: "stable",
@@ -78,6 +80,10 @@ export function loadSettings(): Settings {
           ? clampDelay(parsed.injectDelay)
           : DEFAULT_SETTINGS.injectDelay,
       pipeName: typeof parsed.pipeName === "string" ? parsed.pipeName : "",
+      updateFeed:
+        typeof parsed.updateFeed === "string"
+          ? parsed.updateFeed
+          : DEFAULT_SETTINGS.updateFeed,
       accent: ACCENTS.includes(parsed.accent as Accent)
         ? (parsed.accent as Accent)
         : DEFAULT_SETTINGS.accent,

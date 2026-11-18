@@ -526,6 +526,8 @@ export default function App() {
             settings={settings}
             onChange={updateSettings}
             status={status}
+            appVersion={version}
+            onToast={showToast}
             onOpenAutoexec={() => setView("autoexec")}
             onRunAutoexec={runAutoexec}
           />

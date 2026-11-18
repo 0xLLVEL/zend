@@ -91,6 +91,33 @@ Five views: scripts, hub, autoexec, console, settings.
 - The pinned client build is embedded at compile time; a session that reports a
   different build shows a warning badge in the title bar and status bar.
 
+### Updates
+
+ZEND checks an update feed and never installs anything silently. Settings →
+Updates shows the current version and a **Check now** button. When the feed
+reports a newer version, the panel shows the release notes and a **Download**
+button that opens the URL in the default browser.
+
+The feed is a small JSON document:
+
+```json
+{
+  "version": "0.1.1",
+  "url": "https://github.com/0xLLVEL/zend/releases/download/v0.1.1/ZEND_0.1.1_x64-setup.exe",
+  "published": "2026-11-20",
+  "notes": "Short release notes shown in the panel."
+}
+```
+
+- The default feed is `updates.json` on `main`
+  (`https://raw.githubusercontent.com/0xLLVEL/zend/main/updates.json`).
+- The feed field accepts an HTTPS URL or a local file path, which is useful for
+  testing a release before publishing it.
+- Versions are compared as `major.minor.patch`; pre-release suffixes are
+  ignored, so a beta with the same core version does not prompt.
+- The app only reads the feed and opens the link. Downloading and running the
+  installer stay manual.
+
 ### Loader
 
 - Embedded `payload.7z` with a per-build manifest.
@@ -267,7 +294,8 @@ core/             module.dll (C++20, CMake)
 loader/           RobloxPlayerBeta.dll proxy (C++20, CMake)
 shared/protocol/  wire contract (JSON Schema, TypeScript, C++)
 builds/           pinned build id, per-build manifests
-tools/            offsetdump, repack, detlog, soak, injector, import audit
+updates.json      public update feed read by the app
+tools/            offsetdump, repack, detlog, soak, import audit
 tests/            mock core, native harness, Luau regression suites
 build.ps1         builds core + loader + test host
 ```

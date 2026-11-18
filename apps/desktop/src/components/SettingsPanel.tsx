@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { CoreStatus } from "../lib/core";
 import type { Accent, Channel, Settings } from "../data/settings";
 
@@ -5,9 +7,27 @@ interface SettingsPanelProps {
   settings: Settings;
   onChange: (patch: Partial<Settings>) => void;
   status: CoreStatus;
+  appVersion: string;
+  onToast: (title: string, body: string) => void;
   onOpenAutoexec: () => void;
   onRunAutoexec: () => void;
 }
+
+interface UpdateInfo {
+  current: string;
+  latest: string;
+  available: boolean;
+  url: string;
+  notes: string;
+  published: string;
+  source: "remote" | "file";
+}
+
+type UpdateState =
+  | { phase: "idle" }
+  | { phase: "checking" }
+  | { phase: "done"; info: UpdateInfo }
+  | { phase: "error"; error: string };
 
 interface ToggleProps {
   label: string;
@@ -51,15 +71,56 @@ export function SettingsPanel({
   settings,
   onChange,
   status,
+  appVersion,
+  onToast,
   onOpenAutoexec,
   onRunAutoexec,
 }: SettingsPanelProps) {
+  const [update, setUpdate] = useState<UpdateState>({ phase: "idle" });
   const lines = autoexecLines(settings.autoexec);
   const loaderValue = status.attached
     ? `Attached · pid ${status.pid ?? "?"}`
     : status.connecting
       ? "Attaching…"
       : "Waiting for a client";
+
+  const checkForUpdates = async () => {
+    if (!isTauri()) {
+      setUpdate({ phase: "error", error: "run the desktop app to check for updates" });
+      return;
+    }
+    setUpdate({ phase: "checking" });
+    try {
+      const info = await invoke<UpdateInfo>("update_check", {
+        feed: settings.updateFeed.trim(),
+      });
+      setUpdate({ phase: "done", info });
+      if (info.available) {
+        onToast("Update available", `ZEND ${info.latest} is ready to download.`);
+      }
+    } catch (error) {
+      setUpdate({ phase: "error", error: String(error) });
+    }
+  };
+
+  const openDownload = async () => {
+    if (update.phase !== "done" || !update.info.url) return;
+    try {
+      await invoke("update_open", { url: update.info.url });
+    } catch (error) {
+      onToast("Could not open download", String(error));
+    }
+  };
+
+  const updateState = (() => {
+    if (update.phase === "idle") return "Not checked";
+    if (update.phase === "checking") return "Checking feed…";
+    if (update.phase === "error") return `Check failed: ${update.error}`;
+    const { info } = update;
+    if (!info.available) return `Up to date (latest ${info.latest})`;
+    if (!info.url) return `ZEND ${info.latest} is available, but the feed has no download URL`;
+    return `ZEND ${info.latest} is available${info.published ? ` · ${info.published}` : ""}`;
+  })();
 
   return (
     <div className="z-panel-scroll">
@@ -209,6 +270,60 @@ export function SettingsPanel({
             checked={settings.topmost}
             onChange={(value) => onChange({ topmost: value })}
           />
+        </section>
+
+        <section className="z-section">
+          <h3>Updates</h3>
+          <div className="z-row">
+            <span className="z-row__label">Version</span>
+            <span className="z-row__value z-row__value--mono">{appVersion || "0.0.0"}</span>
+            <span
+              className={`z-chip ${
+                update.phase === "done" && update.info.available ? "" : "z-chip--muted"
+              }`}
+            >
+              {update.phase === "done" && update.info.available ? "available" : "current"}
+            </span>
+          </div>
+          <div className="z-field">
+            <label className="z-field__copy" htmlFor="update-feed">
+              <span className="z-field__label">Update feed</span>
+              <span className="z-field__hint">
+                JSON document with the latest version, a download URL and release notes.
+              </span>
+            </label>
+            <input
+              id="update-feed"
+              className="z-input z-input--mono"
+              value={settings.updateFeed}
+              spellCheck={false}
+              placeholder="https://…/updates.json"
+              onChange={(event) => onChange({ updateFeed: event.target.value })}
+            />
+          </div>
+          <div className="z-field">
+            <span className="z-field__copy">
+              <span className="z-field__label">Status</span>
+              <span className="z-field__hint">{updateState}</span>
+            </span>
+            <span className="z-row__actions">
+              {update.phase === "done" && update.info.available && update.info.url ? (
+                <button className="z-btn" onClick={openDownload}>
+                  Download
+                </button>
+              ) : null}
+              <button
+                className="z-btn z-btn--small"
+                onClick={checkForUpdates}
+                disabled={update.phase === "checking"}
+              >
+                {update.phase === "checking" ? "Checking…" : "Check now"}
+              </button>
+            </span>
+          </div>
+          {update.phase === "done" && update.info.notes ? (
+            <p className="z-panel__note z-update__notes">{update.info.notes}</p>
+          ) : null}
         </section>
 
         <section className="z-section">

@@ -75,7 +75,7 @@ jobs:
           node-version: 22
 
       - name: Configure core
-        run: cmake -S core -B build/core -G "Visual Studio 17 2022" -A x64
+        run: cmake -S core -B build/core -A x64
 
       - name: Build core
         run: cmake --build build/core --config Release
@@ -84,13 +84,13 @@ jobs:
         run: pwsh tools/import-audit.ps1
 
       - name: Configure loader
-        run: cmake -S loader -B build/loader -G "Visual Studio 17 2022" -A x64
+        run: cmake -S loader -B build/loader -A x64
 
       - name: Build loader
         run: cmake --build build/loader --config Release
 
       - name: Configure tests
-        run: cmake -S tests -B build/tests -G "Visual Studio 17 2022" -A x64
+        run: cmake -S tests -B build/tests -A x64
 
       - name: Build tests
         run: cmake --build build/tests --config Release

@@ -43,7 +43,10 @@ weight(DetKind Kind, DetVerdict Verdict)
         break;
     case DetVerdict::Observed:
     default:
-        break;
+        // Normal client traffic (timing probes fire thousands of times per
+        // minute) stays in the ring log but must not move the heat gauge:
+        // heat is the detection-risk budget, not an activity counter.
+        return 0;
     }
     switch (Kind) {
     case DetKind::HandleQuery:

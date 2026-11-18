@@ -21,7 +21,7 @@ Output defaults to `%LOCALAPPDATA%\zend\logs\soak-<utc>.jsonl`. Each line:
 
 | Flag | Default | Fails when |
 |---|---|---|
-| `--max-heat` | 60 | `heat` above the limit |
+| `--max-heat` | 60 | `heat` above the limit (only `Suspicious`/`Confirmed` events raise it) |
 | `--max-queue` | 4 | `queue` above the limit |
 | `--max-disconnects` | 10 | more pipe drops than allowed |
 | `--connect-timeout` | 60 s | no live session is found |

@@ -45,9 +45,11 @@ u64 tick (QPC)  u64 caller  u64 a0  u64 a1  u64 a2  u64 a3
 u32 tid  u16 kind  u8 source  u8 verdict  u32 seq  u32 pad
 ```
 
-`heat` decays toward 0 over 30 s and saturates at 100. `drop` counts events
-suppressed by the 1 s repeat filter. `seq` is monotonic; the newest event is
-`seq == head - 1`.
+`heat` decays toward 0 over 30 s and saturates at 100. Only `Suspicious` (4)
+and `Confirmed` (20) events raise it; `Observed` events are normal client
+traffic (timing probes alone fire thousands of times per minute), so they are
+logged to the ring without moving the gauge. `drop` counts events suppressed by
+the 1 s repeat filter. `seq` is monotonic; the newest event is `seq == head - 1`.
 
 The offsets are duplicated in `tests/detlog-selftest.py`, which writes a
 synthetic ring and runs the reader over it. If `loader/include/emulator/detlog.h`

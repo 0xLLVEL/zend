@@ -85,6 +85,12 @@ void push_gcobject(lua_State* L, GCObject* gco) {
 int g_renv_ref = LUA_NOREF;
 global_State* g_renv_global = nullptr;
 
+int identifyexecutor(lua_State* L) {
+    lua_pushstring(L, "ZEND");
+    lua_pushstring(L, "0.1.0");
+    return 2;
+}
+
 int getgenv(lua_State* L) {
     lua_State* owner = executor::thread();
     if (!owner || owner == L || owner->global != L->global) {
@@ -4303,6 +4309,7 @@ std::string compile(const std::string& source) {
 }
 
 void install(lua_State* L) {
+    set_function(L, "identifyexecutor", identifyexecutor);
     set_function(L, "getgenv", getgenv);
     set_function(L, "getrenv", getrenv);
     set_function(L, "getreg", getreg);

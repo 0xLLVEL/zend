@@ -205,6 +205,9 @@ npm run tauri dev  # desktop window
 
 Installer:
 
+Published installers are attached to
+[releases](https://github.com/0xLLVEL/zend/releases).
+
 ```powershell
 cd apps\desktop
 npm run tauri build

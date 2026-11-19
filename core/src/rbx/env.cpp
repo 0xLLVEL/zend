@@ -122,9 +122,29 @@ void push_gcobject(lua_State* L, GCObject* gco) {
 int g_genv_ref = LUA_NOREF;
 global_State* g_genv_global = nullptr;
 
-// Every C closure the executor installs, plus Lua closures it compiles. Kept
-// here because getscriptclosure and isexecutorclosure both consult it.
-std::unordered_set<Closure*> g_own_closures;
+// Private registry table mapping "_G"/"shared" to the canonical table for this
+// VM. A string-keyed table is used instead of the old literal integer slots:
+// lua_ref hands out integer registry slots, so a fixed slot can collide with a
+// reference and silently replace the shared table.
+int g_shared_registry_ref = LUA_NOREF;
+global_State* g_shared_registry_global = nullptr;
+
+// C functions installed by the executor. Ownership is structural: a C closure
+// is ours exactly when its function pointer is one we install, so a recycled
+// Closure allocation can never inherit ownership from a dead one. Lua closures
+// are identified by their proto (executor::owns_proto), which travels with the
+// proto itself and is equally immune to address reuse.
+std::unordered_set<lua_CFunction> g_own_c_functions;
+
+bool closure_is_executor_owned(Closure* closure) {
+    if (!closure) {
+        return false;
+    }
+    if (closure->isC) {
+        return g_own_c_functions.contains(closure->c.f);
+    }
+    return closure->l.p && executor::owns_proto(closure->l.p);
+}
 
 // The real client global table, returned directly by getrenv. The sandbox
 // proxy's __index chain anchors it, but an explicit ref keeps it alive (and
@@ -314,26 +334,24 @@ int count_table_keys(lua_State* L, int index) {
 }
 
 // Pushes the client's own `_G`/`shared` table when the main globals carry it.
-// Roblox scripts resolve these through the client globals, so the registry
-// slots are only a fallback for VMs that do not publish them there.
-bool push_client_global_table(lua_State* L, const char* name,
-                              int registry_slot) {
+// The main thread is the only fallback when the cached client globals have not
+// been captured yet (first install).
+bool push_client_global_table(lua_State* L, const char* name) {
     lua_State* main = L->global->mainthread;
-    if (main && main->gt && main != L) {
-        luaC_threadbarrier(L);
-        luaC_threadbarrier(main);
+    if (!main || !main->gt) {
+        return false;
+    }
+    luaC_threadbarrier(L);
+    luaC_threadbarrier(main);
+    if (main == L) {
+        lua_pushvalue(L, LUA_GLOBALSINDEX);
+    } else {
         lua_pushvalue(main, LUA_GLOBALSINDEX);
         lua_xmove(main, L, 1);
-        lua_pushstring(L, name);
-        lua_rawget(L, -2);
-        lua_remove(L, -2);
-        if (lua_istable(L, -1)) {
-            return true;
-        }
-        lua_pop(L, 1);
     }
-
-    lua_rawgeti(L, LUA_REGISTRYINDEX, registry_slot);
+    lua_pushstring(L, name);
+    lua_rawget(L, -2);
+    lua_remove(L, -2);
     if (lua_istable(L, -1)) {
         return true;
     }
@@ -341,59 +359,204 @@ bool push_client_global_table(lua_State* L, const char* name,
     return false;
 }
 
-// `_G` and `shared` are VM-wide tables in Roblox: game scripts and executor
-// chunks read the same object. Point the executor table at the client's table
-// (merging anything written before it was visible) so getgenv(), getrenv() and
-// the bare global all observe one table.
-void publish_shared_global(lua_State* L, int env, const char* name,
-                           int registry_slot) {
-    env = lua_absindex(L, env);
-    lua_rawcheckstack(L, 8);
-
-    lua_pushstring(L, name);
-    lua_rawget(L, env);
-    if (!lua_istable(L, -1)) {
-        lua_pop(L, 1);
-        if (!push_client_global_table(L, name, registry_slot)) {
-            lua_newtable(L);
-            lua_pushvalue(L, -1);
-            lua_rawseti(L, LUA_REGISTRYINDEX, registry_slot);
-        }
-        lua_pushvalue(L, -1);
-        lua_setfield(L, env, name);
+// Pushes the private name -> canonical-table map, creating it on first use for
+// this VM. Returns its stack index; the caller pops it.
+int push_shared_registry(lua_State* L) {
+    if (g_shared_registry_global != L->global) {
+        g_shared_registry_global = L->global;
+        g_shared_registry_ref = LUA_NOREF;
     }
+    if (g_shared_registry_ref != LUA_NOREF) {
+        lua_getref(L, g_shared_registry_ref);
+        if (lua_istable(L, -1)) {
+            return lua_gettop(L);
+        }
+        lua_pop(L, 1);
+    }
+    lua_newtable(L);
+    g_shared_registry_ref = lua_ref(L, -1);
+    return lua_gettop(L);
+}
 
-    const int shared = lua_gettop(L);
+// `_G` and `shared` are VM-wide tables in Roblox: the game, every script and
+// the executor all read the same object. Pick one canonical table per VM and
+// write that exact object into the client globals. A table that differs from
+// the canonical one is a deliberate rebound (getrenv()._G = {}) and replaces
+// it; values are never merged, because merging would resurrect keys the
+// script deleted.
+//
+// The executor globals (getgenv()) deliberately do not store a copy: their
+// __index already points at the client globals, so leaving the key out makes
+// `_G` follow any later rebind immediately. A raw key in the executor globals
+// can only come from an explicit `getgenv()._G = ...`, which is propagated
+// once and then removed again so it cannot shadow future client rebinds.
+void publish_shared_global(lua_State* L, int env, const char* name) {
+    env = lua_absindex(L, env);
+    const int base_top = lua_gettop(L);
+    lua_rawcheckstack(L, 16);
 
+    int genv = 0;
     if (g_genv_global == L->global && g_genv_ref != LUA_NOREF) {
         lua_getref(L, g_genv_ref);
         if (lua_istable(L, -1)) {
-            const int genv = lua_gettop(L);
-            lua_pushstring(L, name);
-            lua_rawget(L, genv);
-            if (lua_istable(L, -1) && !lua_rawequal(L, -1, shared)) {
-                lua_pushnil(L);
-                while (lua_next(L, -2) != 0) {
-                    lua_pushvalue(L, -2);
-                    lua_pushvalue(L, -2);
-                    lua_rawset(L, shared);
-                    lua_pop(L, 1);
-                }
-            }
+            genv = lua_gettop(L);
+        } else {
             lua_pop(L, 1);
+        }
+    }
 
-            lua_pushvalue(L, shared);
-            lua_setfield(L, genv, name);
+    // Tables that receive the canonical object, highest priority first. The
+    // executor globals are excluded on purpose (see above).
+    lua_newtable(L);
+    const int candidates = lua_gettop(L);
+    int count = 0;
+    const auto add_candidate = [&](int table) {
+        table = lua_absindex(L, table);
+        if (!lua_istable(L, table)) {
+            return;
+        }
+        if (genv && lua_rawequal(L, table, genv)) {
+            return;
+        }
+        for (int i = 1; i <= count; ++i) {
+            lua_rawgeti(L, candidates, i);
+            const bool same = lua_rawequal(L, -1, table) != 0;
+            lua_pop(L, 1);
+            if (same) {
+                return;
+            }
+        }
+        lua_pushvalue(L, table);
+        lua_rawseti(L, candidates, ++count);
+    };
+    add_candidate(env);
+    if (g_client_globals_global == L->global &&
+        g_client_globals_ref != LUA_NOREF) {
+        lua_getref(L, g_client_globals_ref);
+        add_candidate(lua_gettop(L));
+        lua_pop(L, 1);
+    }
+
+    int base_ref = LUA_NOREF;
+    const int registry = push_shared_registry(L);
+    lua_pushstring(L, name);
+    lua_rawget(L, registry);
+    if (lua_istable(L, -1)) {
+        base_ref = lua_ref(L, -1);
+    }
+    lua_settop(L, registry - 1);
+
+    int chosen_ref = LUA_NOREF;
+    const auto is_rebound = [&](int value) {
+        if (!lua_istable(L, value)) {
+            return false;
+        }
+        if (base_ref == LUA_NOREF) {
+            return true;
+        }
+        lua_getref(L, base_ref);
+        const bool differs = lua_rawequal(L, -1, value) == 0;
+        lua_pop(L, 1);
+        return differs;
+    };
+
+    // An explicit write through getgenv() wins over everything else.
+    if (genv) {
+        lua_pushstring(L, name);
+        lua_rawget(L, genv);
+        if (is_rebound(lua_gettop(L))) {
+            chosen_ref = lua_ref(L, -1);
         }
         lua_pop(L, 1);
     }
 
-    lua_pop(L, 1);
+    // The first table that differs from the stored canonical is the newest
+    // replacement; later candidates are stale copies and must not win back.
+    for (int i = 1; i <= count && chosen_ref == LUA_NOREF; ++i) {
+        lua_rawgeti(L, candidates, i);
+        const int table = lua_gettop(L);
+        lua_pushstring(L, name);
+        lua_rawget(L, table);
+        if (is_rebound(lua_gettop(L))) {
+            chosen_ref = lua_ref(L, -1);
+        }
+        lua_pop(L, 2);
+    }
+
+    if (chosen_ref == LUA_NOREF && base_ref != LUA_NOREF) {
+        lua_getref(L, base_ref);
+        chosen_ref = lua_ref(L, -1);
+        lua_pop(L, 1);
+    }
+    if (chosen_ref == LUA_NOREF && push_client_global_table(L, name)) {
+        chosen_ref = lua_ref(L, -1);
+        lua_pop(L, 1);
+    }
+    if (chosen_ref == LUA_NOREF) {
+        lua_newtable(L);
+        chosen_ref = lua_ref(L, -1);
+        lua_pop(L, 1);
+    }
+
+    const int reg = push_shared_registry(L);
+    lua_pushstring(L, name);
+    lua_getref(L, chosen_ref);
+    lua_rawset(L, reg);
+    lua_settop(L, reg - 1);
+
+    // The client globals (and the sandbox they come from) are readonly tables
+    // in this VM. rawset bypasses __newindex but not the readonly flag, so
+    // clear it for the write and restore it afterwards.
+    const auto rawset_name = [&](int table) {
+        table = lua_absindex(L, table);
+        const int readonly = lua_getreadonly(L, table);
+        if (readonly) {
+            lua_setreadonly(L, table, 0);
+        }
+        lua_pushstring(L, name);
+        lua_getref(L, chosen_ref);
+        lua_rawset(L, table);
+        if (readonly) {
+            lua_setreadonly(L, table, 1);
+        }
+    };
+
+    for (int i = 1; i <= count; ++i) {
+        lua_rawgeti(L, candidates, i);
+        rawset_name(lua_gettop(L));
+        lua_pop(L, 1);
+    }
+
+    // Drop any executor-globals copy so the __index chain keeps following the
+    // client table.
+    if (genv) {
+        const int readonly = lua_getreadonly(L, genv);
+        if (readonly) {
+            lua_setreadonly(L, genv, 0);
+        }
+        lua_pushstring(L, name);
+        lua_pushnil(L);
+        lua_rawset(L, genv);
+        if (readonly) {
+            lua_setreadonly(L, genv, 1);
+        }
+    }
+
+    if (base_ref != LUA_NOREF) {
+        lua_unref(L, base_ref);
+    }
+    lua_unref(L, chosen_ref);
+    lua_settop(L, base_top);
 }
 
 int getgenv(lua_State* L) {
     if (g_genv_global == L->global && g_genv_ref != LUA_NOREF) {
         lua_getref(L, g_genv_ref);
+        if (lua_istable(L, -1)) {
+            const int env = lua_gettop(L);
+            publish_shared_global(L, env, "_G");
+            publish_shared_global(L, env, "shared");
+        }
         if (env_trace()) {
             zend::logf("env.getgenv: keys=%d", count_table_keys(L, -1));
         }
@@ -444,8 +607,8 @@ int getrenv(lua_State* L) {
     // Roblox scripts read `_G` and `shared` through the same VM-wide tables.
     // Publish them into the real globals and point the executor at them, so a
     // write through getrenv() is visible to the executor and vice versa.
-    publish_shared_global(L, env, "_G", 2);
-    publish_shared_global(L, env, "shared", 4);
+    publish_shared_global(L, env, "_G");
+    publish_shared_global(L, env, "shared");
 
     if (env_trace()) {
         int g_keys = 0;
@@ -1304,8 +1467,9 @@ std::string instance_class_name(lua_State* L, int index);
 std::uintptr_t instance_raw_pointer(lua_State* L, int index);
 
 // The engine keeps a module record per ModuleScript once require() has run.
-// A never-required module has a null (or non-pointer) field here, so this is
-// the source of truth even when the module closure has been collected.
+// A never-required module has a null (or non-pointer) field here. State 2 is
+// the engine's "completed" value; 1 (running) and 3 (errored) are explicitly
+// excluded because getloadedmodules only reports completed executions.
 bool module_is_loaded(std::uintptr_t script) {
     std::uintptr_t module = 0;
     if (!read_ptr(script + off::kModuleScriptModule, module) ||
@@ -1313,7 +1477,37 @@ bool module_is_loaded(std::uintptr_t script) {
         return false;
     }
     std::uint32_t state = 0;
-    return read(module, state) && state >= 1 && state <= 8;
+    return read(module, state) && state == 2;
+}
+
+// True when this ModuleScript userdata belongs to a completed require. Engine
+// records cover engine-loaded modules; the runtime cache covers modules whose
+// Source was compiled here. Anything else (never required, running, errored)
+// is excluded.
+bool module_instance_completed(lua_State* L, int index) {
+    const std::uintptr_t raw = instance_raw_pointer(L, index);
+    if (!raw) {
+        return false;
+    }
+    if (module_is_loaded(raw)) {
+        return true;
+    }
+    if (g_module_cache_ref == LUA_NOREF) {
+        return false;
+    }
+    index = lua_absindex(L, index);
+    lua_getref(L, g_module_cache_ref);
+    const int cache = lua_gettop(L);
+    lua_pushvalue(L, index);
+    lua_rawget(L, cache);
+    bool completed = false;
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "status");
+        completed = lua_tointeger(L, -1) == 1;
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 2);
+    return completed;
 }
 
 // Walks the DataModel so loaded modules are found without relying on a cached
@@ -1405,10 +1599,10 @@ void collect_loaded_modules_from_userdata(
     kept = static_cast<std::uintptr_t>(scan.count);
 }
 
-// Every module require has started is tracked in the require cache table. A
-// failed or still-running module has no engine record and its module closure
-// may already be collected, so this set is the authoritative remainder of the
-// engine's loadedModules behavior.
+// Runtime modules (those without engine bytecode) are tracked in the require
+// cache table. Only status 1 (completed) may be listed: a failed or still
+// running module has no completed execution, which is exactly what
+// getloadedmodules excludes.
 void collect_required_modules(lua_State* L, int out,
                               std::unordered_set<const void*>& seen,
                               std::uintptr_t& kept) {
@@ -1420,7 +1614,17 @@ void collect_required_modules(lua_State* L, int out,
     lua_rawcheckstack(L, 2);
     lua_pushnil(L);
     while (lua_next(L, cache) != 0) {
-        const std::uintptr_t raw = instance_raw_pointer(L, -2);
+        const bool completed = [&] {
+            if (!lua_istable(L, -1)) {
+                return false;
+            }
+            lua_getfield(L, -1, "status");
+            const bool status = lua_tointeger(L, -1) == 1;
+            lua_pop(L, 1);
+            return status;
+        }();
+        const std::uintptr_t raw =
+            completed ? instance_raw_pointer(L, -2) : 0;
         if (raw && seen.insert(reinterpret_cast<const void*>(raw)).second) {
             lua_pushvalue(L, -2);
             lua_rawseti(L, out, static_cast<int>(++kept));
@@ -1450,7 +1654,8 @@ int getloadedmodules(lua_State* L) {
         const int base = lua_gettop(L);
         lua_pushvalue(L, inspector);
         lua_rawgeti(L, pool, index);
-        if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_isuserdata(L, -1)) {
+        if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_isuserdata(L, -1) &&
+            module_instance_completed(L, -1)) {
             void** slot = static_cast<void**>(lua_touserdata(L, -1));
             const void* instance = slot ? *slot : nullptr;
             if (instance && seen.insert(instance).second) {
@@ -2312,7 +2517,6 @@ int getscriptclosure(lua_State* L) {
         return 1;
     }
     executor::apply_capabilities(closure->l.p);
-    g_own_closures.insert(closure);
 
     lua_xmove(thread, L, 1);
     lua_settop(thread, 0);
@@ -4001,6 +4205,11 @@ bool lookup_scriptable_override(std::uintptr_t instance, const char* name,
     return true;
 }
 
+// SharedString is a ref-counted node: its std::string payload sits at +0x18
+// and the reference count at +0x40 (dump: SharedString::NodeString /
+// SharedString::NodeRefCount). The instance field holds the node pointer.
+constexpr std::uintptr_t kSharedStringNodeString = 0x18;
+
 // Reads a hidden BinaryString straight out of the instance field described by
 // the verified offset dump (dump/offsets_rbx.hpp). The property descriptor
 // getter is deliberately not used: calling it for Terrain.MaterialColors has
@@ -4269,6 +4478,75 @@ bool read_shared_string_via_engine(lua_State* L, int index, const char* name,
     return ok;
 }
 
+// Calls the engine's generated getter thunk for a SharedString. ABI:
+// `SharedString* thunk(getset, out, instance)`; `out` receives a refcounted
+// node pointer and the node's reference count at +0x40 is bumped. The
+// reference is intentionally left held: releasing it by hand raced with the
+// engine during probing. A few leaked references are harmless and keep the
+// engine's allocator untouched.
+bool invoke_shared_string_thunk(std::uintptr_t thunk, std::uintptr_t getset,
+                                std::uintptr_t instance,
+                                std::uintptr_t& node) {
+    node = 0;
+    __try {
+        using getter_t = void*(__fastcall*)(void*, void*, void*);
+        reinterpret_cast<getter_t>(thunk)(reinterpret_cast<void*>(getset),
+                                          &node,
+                                          reinterpret_cast<void*>(instance));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        node = 0;
+        return false;
+    }
+    return true;
+}
+
+bool read_shared_string_via_getter(std::uintptr_t property,
+                                   std::uintptr_t instance, std::string& out) {
+    std::uintptr_t getset = 0;
+    std::uintptr_t vtable = 0;
+    std::uintptr_t thunk = 0;
+    if (!property || !instance ||
+        !read_ptr(property + kPropertyGetSet, getset) || !getset ||
+        !read_ptr(getset, vtable) || !vtable ||
+        !read_ptr(vtable + 0x18, thunk) || !thunk) {
+        return false;
+    }
+
+    std::uintptr_t node = 0;
+    if (!invoke_shared_string_thunk(thunk, getset, instance, node)) {
+        if (env_trace()) {
+            zend::logf("env.binary_string: getter fault getset=%p thunk=%p "
+                       "instance=%p",
+                       reinterpret_cast<void*>(getset),
+                       reinterpret_cast<void*>(thunk),
+                       reinterpret_cast<void*>(instance));
+        }
+        return false;
+    }
+
+    const bool valid = is_user_ptr(node);
+    if (env_trace()) {
+        std::uint64_t length = 0;
+        std::uint64_t capacity = 0;
+        if (valid) {
+            read(node + kSharedStringNodeString + 0x10, length);
+            read(node + kSharedStringNodeString + 0x18, capacity);
+        }
+        zend::logf("env.binary_string: getter getset=%p thunk=%p instance=%p "
+                   "node=%p len=%llu cap=%llu",
+                   reinterpret_cast<void*>(getset),
+                   reinterpret_cast<void*>(thunk),
+                   reinterpret_cast<void*>(instance),
+                   reinterpret_cast<void*>(node),
+                   static_cast<unsigned long long>(length),
+                   static_cast<unsigned long long>(capacity));
+    }
+    if (!valid) {
+        return false;
+    }
+    return read_msvc_string(node + kSharedStringNodeString, out);
+}
+
 bool push_binary_string_field(lua_State* L, int index, std::uintptr_t instance,
                               std::uintptr_t property, const char* name,
                               bool shared_string) {
@@ -4334,8 +4612,8 @@ bool push_binary_string_field(lua_State* L, int index, std::uintptr_t instance,
                    static_cast<unsigned long long>(getter_rva),
                    static_cast<unsigned long long>(setter_rva));
     }
-    // SharedString is a ref-counted object whose std::string payload starts at
-    // +0x10; BinaryString stores the std::string directly in the instance.
+    // SharedString is a ref-counted node whose std::string payload starts at
+    // +0x18; BinaryString stores the std::string directly in the instance.
     // A present field may legitimately hold an empty string.
     std::string value;
     auto read_payload = [&](std::uintptr_t field_offset, bool shared,
@@ -4344,7 +4622,8 @@ bool push_binary_string_field(lua_State* L, int index, std::uintptr_t instance,
         if (shared) {
             std::uintptr_t object = 0;
             if (read_ptr(instance + field_offset, object) &&
-                is_user_ptr(object) && read_msvc_string(object + 0x10, out)) {
+                is_user_ptr(object) &&
+                read_msvc_string(object + kSharedStringNodeString, out)) {
                 return true;
             }
         }
@@ -4363,123 +4642,123 @@ bool push_binary_string_field(lua_State* L, int index, std::uintptr_t instance,
 
     bool ok = offset != 0 && read_payload(offset, shared_string, value);
 
-    // AeroMeshData has no instance offset in its descriptor. PartOperation
-    // stores a generated mesh in the dumped mesh slots; MeshPart and the other
-    // TriangleMeshPart classes compute the value from their mesh asset and do
-    // not have those slots. Reading PartOperation offsets on a MeshPart picks
-    // up unrelated strings (including the bridge error buffer), so only scan
-    // the slots on classes that actually own them.
-    if (!ok && name && std::strcmp(name, "AeroMeshData") == 0) {
+    // AeroMeshData is TriangleMeshPart's SharedString. The engine getter for
+    // this build (RVA 0xE3FBD0) resolves it through a wrapper field, so the
+    // node pointer is not necessarily the first qword of the dumped mesh
+    // slots. Scan the TriangleMeshPart fields for a SharedString node and log
+    // every plausible candidate; the real AeroMeshData node is the one whose
+    // payload length matches the engine getter (11928 bytes here).
+    if (name && std::strcmp(name, "AeroMeshData") == 0) {
+        constexpr std::size_t kExpectedAeroMeshLength = 11928;
         const std::string class_name = instance_class_name(L, index);
-        const bool part_operation =
-            class_name == "PartOperation" || class_name == "UnionOperation" ||
-            class_name == "IntersectOperation" ||
-            class_name == "NegateOperation";
-        if (!part_operation) {
+
+        // Preferred path: the engine's own property getter returns the exact
+        // node the Lua getter would expose. The raw field can hold a wrapper
+        // whose first qword is not the SharedString node.
+        if (read_shared_string_via_getter(property, instance, value)) {
+            ok = true;
+        }
+
+        if (!ok) {
+            std::uintptr_t best_node = 0;
+            int logged = 0;
+
+            for (std::uintptr_t field = 0x100; field <= 0x500; field += 8) {
+                std::uintptr_t pointer = 0;
+                if (!read_ptr(instance + field, pointer) ||
+                    !is_user_ptr(pointer)) {
+                    continue;
+                }
+                std::uintptr_t nodes[8] = {pointer, 0, 0, 0, 0, 0, 0, 0};
+                for (int index = 1; index < 8; ++index) {
+                    std::uintptr_t wrapper_node = 0;
+                    if (read_ptr(pointer + static_cast<std::uintptr_t>(index - 1) *
+                                              0x8,
+                                 wrapper_node) &&
+                        is_user_ptr(wrapper_node)) {
+                        nodes[index] = wrapper_node;
+                    }
+                }
+                for (int slot = 0; slot < 8; ++slot) {
+                    const std::uintptr_t node = nodes[slot];
+                    if (!node) {
+                        continue;
+                    }
+                    std::uint64_t length = 0;
+                    std::uint64_t capacity = 0;
+                    if (!read(node + kSharedStringNodeString + 0x10, length) ||
+                        !read(node + kSharedStringNodeString + 0x18, capacity) ||
+                        length > (64u << 20) || capacity > (64u << 20) ||
+                        length > capacity) {
+                        continue;
+                    }
+                    if (env_trace() && logged < 80) {
+                        zend::logf("env.binary_string: AeroMeshData scan "
+                                   "field=0x%llX slot=%d node=%p len=%llu "
+                                   "cap=%llu",
+                                   static_cast<unsigned long long>(field), slot,
+                                   reinterpret_cast<void*>(node),
+                                   static_cast<unsigned long long>(length),
+                                   static_cast<unsigned long long>(capacity));
+                        ++logged;
+                    }
+                    if (length == kExpectedAeroMeshLength) {
+                        best_node = node;
+                    }
+                }
+            }
+
+            if (best_node) {
+                std::string scan_value;
+                if (read_msvc_string(best_node + kSharedStringNodeString,
+                                     scan_value)) {
+                    value = std::move(scan_value);
+                    ok = true;
+                    if (env_trace()) {
+                        zend::logf("env.binary_string: AeroMeshData scanned "
+                                   "class=%s len=%zu",
+                                   class_name.c_str(), value.size());
+                    }
+                }
+            }
+        }
+
+        if (!ok) {
+            constexpr std::uintptr_t kCandidates[] = {0x350, 0x388};
+            for (const std::uintptr_t candidate : kCandidates) {
+                std::uintptr_t holder = 0;
+                if (!read_ptr(instance + candidate, holder) ||
+                    !is_user_ptr(holder)) {
+                    continue;
+                }
+                std::string candidate_value;
+                if (!read_msvc_string(holder + kSharedStringNodeString,
+                                      candidate_value)) {
+                    continue;
+                }
+                if (env_trace()) {
+                    zend::logf("env.binary_string: AeroMeshData fallback "
+                               "+0x%X len=%zu",
+                               static_cast<unsigned>(candidate),
+                               candidate_value.size());
+                }
+                if (candidate_value.size() > value.size()) {
+                    value = std::move(candidate_value);
+                }
+            }
+            if (!value.empty()) {
+                ok = true;
+            }
+        }
+
+        if (!ok) {
+            // A class with no generated mesh exposes an empty SharedString;
+            // the descriptor exists, so return the empty string, not nil.
             value.clear();
             ok = true;
             if (env_trace()) {
                 zend::logf("env.binary_string: AeroMeshData %s empty",
                            class_name.c_str());
-            }
-        } else {
-            constexpr std::uintptr_t kCandidates[] = {0x350, 0x388, 0x318, 0x378};
-            bool saw_field = false;
-            for (const std::uintptr_t candidate : kCandidates) {
-                std::string current;
-                std::uintptr_t object = 0;
-                if (read_ptr(instance + candidate, object) && is_user_ptr(object)) {
-                    saw_field = true;
-                    for (const std::uintptr_t inner :
-                         {0x10, 0x18, 0x0, 0x8, 0x20}) {
-                        std::string candidate_value;
-                        if (!read_msvc_string(object + inner, candidate_value)) {
-                            continue;
-                        }
-                        if (env_trace()) {
-                            zend::logf("env.binary_string: AeroMeshData +0x%X"
-                                       " inner=0x%X len=%zu",
-                                       static_cast<unsigned>(candidate),
-                                       static_cast<unsigned>(inner),
-                                       candidate_value.size());
-                        }
-                        if (candidate_value.size() > current.size()) {
-                            current = std::move(candidate_value);
-                        }
-                    }
-                }
-                std::string direct;
-                if (read_msvc_string(instance + candidate, direct)) {
-                    saw_field = true;
-                    if (direct.size() > current.size()) {
-                        current = std::move(direct);
-                    }
-                }
-                if (current.size() > value.size()) {
-                    value = std::move(current);
-                }
-                if (!value.empty()) {
-                    if (env_trace()) {
-                        zend::logf("env.binary_string: AeroMeshData +0x%X len=%zu",
-                                   static_cast<unsigned>(candidate), value.size());
-                    }
-                    ok = true;
-                    break;
-                }
-            }
-
-            // Trace-only probe: look for other SharedString-shaped holders in
-            // the object so the real AeroMeshData slot can be identified
-            // empirically instead of guessing offsets.
-            if (env_trace()) {
-                for (std::uintptr_t offset = 0x200; offset <= 0x500;
-                     offset += 8) {
-                    std::uintptr_t holder = 0;
-                    if (!read_ptr(instance + offset, holder) ||
-                        !is_user_ptr(holder)) {
-                        continue;
-                    }
-                    for (const std::uintptr_t inner :
-                         {0x0, 0x8, 0x10, 0x18, 0x20, 0x28}) {
-                        std::uint64_t length = 0;
-                        std::uint64_t capacity = 0;
-                        if (!read(holder + inner + 0x10, length) ||
-                            !read(holder + inner + 0x18, capacity) ||
-                            length == 0 || length > (1u << 20) ||
-                            capacity < length || capacity > (4u << 20)) {
-                            continue;
-                        }
-                        std::string candidate;
-                        if (!read_msvc_string(holder + inner, candidate) ||
-                            candidate.empty()) {
-                            continue;
-                        }
-                        const auto* bytes =
-                            reinterpret_cast<const unsigned char*>(
-                                candidate.data());
-                        const unsigned b0 = candidate.size() > 0 ? bytes[0] : 0;
-                        const unsigned b1 = candidate.size() > 1 ? bytes[1] : 0;
-                        const unsigned b2 = candidate.size() > 2 ? bytes[2] : 0;
-                        const unsigned b3 = candidate.size() > 3 ? bytes[3] : 0;
-                        zend::logf("env.aero_scan: off=0x%X inner=0x%X "
-                                   "len=%zu cap=%llu head=%02X%02X%02X%02X",
-                                   static_cast<unsigned>(offset),
-                                   static_cast<unsigned>(inner),
-                                   candidate.size(),
-                                   static_cast<unsigned long long>(capacity),
-                                   b0, b1, b2, b3);
-                    }
-                }
-            }
-
-            // A union with no generated mesh exposes an empty SharedString; the
-            // field exists, so return the empty string instead of nil.
-            if (!ok && saw_field) {
-                value.clear();
-                ok = true;
-                if (env_trace()) {
-                    zend::logf("env.binary_string: AeroMeshData empty");
-                }
             }
         }
     }
@@ -4511,6 +4790,10 @@ int gethiddenproperty(lua_State* L) {
 
     const std::uintptr_t property = resolve_property(L, 1, name);
     if (!property) {
+        if (env_trace()) {
+            zend::logf("env.gethiddenproperty: no descriptor class=%s prop=%s",
+                       instance_class_name(L, 1).c_str(), name);
+        }
         lua_pushnil(L);
         return 1;
     }
@@ -4554,20 +4837,7 @@ int gethiddenproperty(lua_State* L) {
     // SharedString values that the engine can convert are returned by the
     // bridge itself; the direct-field probe below stays as a fallback for
     // builds/properties where no Lua converter exists.
-    if (type_id == kTypeSharedString && instance && name &&
-        std::strcmp(name, "Tags") != 0) {
-        std::string engine_value;
-        if (read_shared_string_via_engine(L, 1, name, property, engine_value)) {
-            if (env_trace()) {
-                zend::logf("env.binary_string: prop=%s engine_len=%zu", name,
-                           engine_value.size());
-            }
-            lua_pushlstring(L, engine_value.data(), engine_value.size());
-            lua_pushboolean(L, hidden ? 1 : 0);
-            return 2;
-        }
-    }
-
+    
     if (type_id == kTypeBinaryString || type_id == kTypeSharedString) {
         if (instance &&
             push_binary_string_field(L, 1, instance, property, name,
@@ -4645,6 +4915,10 @@ int sethiddenproperty(lua_State* L) {
 
     const std::uintptr_t property = resolve_property(L, 1, name);
     if (!property) {
+        if (env_trace()) {
+            zend::logf("env.sethiddenproperty: no descriptor class=%s prop=%s",
+                       instance_class_name(L, 1).c_str(), name);
+        }
         lua_pushnil(L);
         return 1;
     }
@@ -6236,23 +6510,11 @@ int islclosure(lua_State* L) {
 int isexecutorclosure(lua_State* L) {
     luaL_checktype(L, 1, LUA_TFUNCTION);
     Closure* closure = clvalue(luaA_toobject(L, 1));
-
-    const bool ours =
-        closure &&
-        (g_own_closures.contains(closure) ||
-         (!closure->isC && executor::owns_proto(closure->l.p)));
-    lua_pushboolean(L, ours ? 1 : 0);
+    lua_pushboolean(L, closure_is_executor_owned(closure) ? 1 : 0);
     return 1;
 }
 
 // --- filtergc ------------------------------------------------------------
-
-bool closure_is_executor_owned(Closure* closure) {
-    return closure &&
-           (g_own_closures.contains(closure) ||
-            (!closure->isC && closure->l.p &&
-             executor::owns_proto(closure->l.p)));
-}
 
 bool table_filter_has_all(lua_State* L, int candidate, int options,
                           const char* field, int mode) {
@@ -6581,10 +6843,6 @@ struct HookRecord {
     // function, not a clone of the wrapper, so restoring has to rebuild the
     // wrapper dispatcher instead of copying that function over the C closure.
     bool original_is_wrapper = false;
-    // Whether checkcaller already considered the target one of ours before
-    // this hook. Restored client closures are removed again so a later GC
-    // cannot leave a stale pointer behind.
-    bool own_before = false;
 };
 
 struct NewCClosureRecord {
@@ -6833,9 +7091,6 @@ Closure* clone_closure(lua_State* L, Closure* source) {
         lua_pop(L, 1);
         g_newc[clone] = {retain_ref(L, newc->second.function_ref), wrapper_ref, false};
         g_wrapped.insert(clone);
-        // The clone runs the same dispatcher, so checkcaller must see it as
-        // ours just like the original wrapper.
-        g_own_closures.insert(clone);
     }
 
     auto hook = g_hooks.find(source);
@@ -6848,9 +7103,6 @@ Closure* clone_closure(lua_State* L, Closure* source) {
         snapshot.target_ref = lua_ref(L, -1);
         lua_pop(L, 1);
         g_hooks[clone] = snapshot;
-        if (g_own_closures.contains(source)) {
-            g_own_closures.insert(clone);
-        }
     }
 
     return clone;
@@ -6860,12 +7112,12 @@ void install_hook_body(lua_State* L, Closure* target) {
     if (target->isC) {
         target->c.f = hook_c_dispatch;
         target->c.cont = dispatch_continuation;
-        g_own_closures.insert(target);
         return;
     }
 
     Proto* original = target->l.p;
     Proto* dispatcher = make_hook_dispatcher_proto(L, original);
+    executor::apply_capabilities(dispatcher);
 
     // The closure keeps its original upvalue count: luaF_freeclosure derives the
     // allocation size from it, so shrinking it here would free the wrong size
@@ -6890,7 +7142,6 @@ void restore_hook_body(lua_State* L, Closure* target, const HookRecord& record) 
         }
         target->c.f = newc_dispatch;
         target->c.cont = dispatch_continuation;
-        g_own_closures.insert(target);
         return;
     }
 
@@ -6899,9 +7150,6 @@ void restore_hook_body(lua_State* L, Closure* target, const HookRecord& record) 
         luaL_error(L, "restorefunction: incompatible closure layout");
     }
     copy_closure_body(L, target, original);
-    if (!record.own_before) {
-        g_own_closures.erase(target);
-    }
 }
 
 void release_hook(lua_State* L, HookRecord& record) {
@@ -6921,7 +7169,6 @@ int install_hook(lua_State* L, int target_index, int hook_index) {
     if (it == g_hooks.end()) {
         HookRecord record;
         record.target_ref = ref_at(L, target_index);
-        record.own_before = g_own_closures.contains(target);
 
         auto wrapper = g_newc.find(target);
         if (target->isC && wrapper != g_newc.end()) {
@@ -7108,10 +7355,6 @@ int hookmetamethod(lua_State* L) {
             lua_pushvalue(L, 3);
             lua_pushcclosurek(L, namecall_wrapper, "__namecall", 1,
                               dispatch_continuation);
-            Closure* wrapper = clvalue(luaA_toobject(L, -1));
-            if (wrapper) {
-                g_own_closures.insert(wrapper);
-            }
             lua_rawsetfield(L, metatable, metamethod);
         }
 
@@ -7176,7 +7419,6 @@ int newcclosure(lua_State* L) {
     lua_pop(L, 1);
 
     g_wrapped.insert(wrapper);
-    g_own_closures.insert(wrapper);
 
     wrapper->env = closure->env;
     if (wrapper->env) {
@@ -7634,6 +7876,7 @@ bool push_proto_closure(lua_State* L, Proto* proto) {
     if (!cloned) {
         return false;
     }
+    executor::apply_capabilities(cloned);
 
     lua_rawcheckstack(L, 1);
     luaC_threadbarrier(L);
@@ -7645,7 +7888,6 @@ bool push_proto_closure(lua_State* L, Proto* proto) {
     }
     setclvalue(L, L->top, closure);
     incr_top(L);
-    g_own_closures.insert(closure);
     return true;
 }
 
@@ -7728,6 +7970,7 @@ int debug_getprotos(lua_State* L) {
             L->global->GCthreshold = SIZE_MAX;
             Proto* proto = clone_proto(L, child);
             if (proto) {
+                executor::apply_capabilities(proto);
                 Closure* child_closure =
                     luaF_newLclosure(L, child->nups, env, proto);
                 push_closure(L, child_closure);
@@ -8745,6 +8988,7 @@ int crypt_decrypt(lua_State* L) {
 
 void set_field_function(lua_State* L, const char* name, lua_CFunction function) {
     lua_pushcclosure(L, function, name, 0);
+    g_own_c_functions.insert(function);
     lua_setfield(L, -2, name);
 }
 
@@ -8803,7 +9047,6 @@ int loadstring(lua_State* L) {
     Closure* closure = clvalue(luaA_toobject(L, -1));
     if (closure && !closure->isC && closure->l.p) {
         executor::apply_capabilities(closure->l.p);
-        g_own_closures.insert(closure);
     }
     return 1;
 }
@@ -8849,7 +9092,6 @@ int loadfile(lua_State* L) {
     Closure* closure = clvalue(luaA_toobject(L, -1));
     if (closure && !closure->isC && closure->l.p) {
         executor::apply_capabilities(closure->l.p);
-        g_own_closures.insert(closure);
     }
     return 1;
 }
@@ -8912,10 +9154,7 @@ int getcustomasset(lua_State* L) {
 
 void set_function(lua_State* L, const char* name, lua_CFunction function) {
     lua_pushcclosure(L, function, name, 0);
-    Closure* closure = clvalue(luaA_toobject(L, -1));
-    if (closure) {
-        g_own_closures.insert(closure);
-    }
+    g_own_c_functions.insert(function);
     lua_setglobal(L, name);
 }
 
@@ -8924,10 +9163,7 @@ void set_function(lua_State* L, const char* name, lua_CFunction function) {
 void set_function_k(lua_State* L, const char* name, lua_CFunction function,
                     lua_Continuation continuation) {
     lua_pushcclosurek(L, function, name, 0, continuation);
-    Closure* closure = clvalue(luaA_toobject(L, -1));
-    if (closure) {
-        g_own_closures.insert(closure);
-    }
+    g_own_c_functions.insert(function);
     lua_setglobal(L, name);
 }
 
@@ -10803,6 +11039,25 @@ void install(lua_State* L) {
 
     clear_instance_fast_paths(L);
 
+    // C functions installed outside set_function: the hook/newc dispatchers,
+    // connection methods and the shared instance bridge. Ownership is keyed by
+    // function pointer, so one insert covers every closure made from them.
+    static const lua_CFunction kOwnFunctions[] = {
+        newc_dispatch,       hook_c_dispatch,       namecall_wrapper,
+        connection_index,    connection_newindex,   connection_noop,
+        connection_fire,     connection_defer,      connection_disable,
+        connection_enable,   connection_disconnect, instance_index_wrapper,
+        instance_namecall_wrapper,
+    };
+    for (lua_CFunction function : kOwnFunctions) {
+        g_own_c_functions.insert(function);
+    }
+    int drawing_functions = 0;
+    const lua_CFunction* drawing_own = drawing::own_functions(&drawing_functions);
+    for (int i = 0; i < drawing_functions; ++i) {
+        g_own_c_functions.insert(drawing_own[i]);
+    }
+
     // Remember the real client globals now: the sandbox proxy's __index is
     // repointed to the executor table below, so this is the last place the
     // original table is visible without guessing at thread layout.
@@ -11009,8 +11264,8 @@ void install(lua_State* L) {
     // `_G` and `shared` are VM-wide tables in Roblox: every script, game or
     // executor, reads the same objects. Point the executor environment at the
     // client's tables so writes are shared exactly like the real client.
-    publish_shared_global(L, LUA_GLOBALSINDEX, "_G", 2);
-    publish_shared_global(L, LUA_GLOBALSINDEX, "shared", 4);
+    publish_shared_global(L, LUA_GLOBALSINDEX, "_G");
+    publish_shared_global(L, LUA_GLOBALSINDEX, "shared");
 
     // Put the per-chunk proxy back. The shared table remains anchored by the
     // registry ref and, from now on, by the proxy metatable's __index.
@@ -11029,7 +11284,9 @@ void reset() {
     g_game_ref = LUA_NOREF;
     g_require_ref = LUA_NOREF;
     g_module_cache_ref = LUA_NOREF;
-    g_own_closures.clear();
+    g_shared_registry_ref = LUA_NOREF;
+    g_shared_registry_global = nullptr;
+    g_own_c_functions.clear();
     g_hooks.clear();
     g_newc.clear();
     g_wrapped.clear();

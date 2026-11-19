@@ -16,6 +16,11 @@ using RegisterFn = void (*)(lua_State*, const char*, lua_CFunction);
 // Registers `Drawing` plus the helper globals on the sandboxed globals table.
 void install(lua_State* L, RegisterFn register_global);
 
+// C functions used by Drawing objects and their metatable. env registers them
+// as executor-owned so isexecutorclosure, checkcaller and hook bookkeeping
+// agree that closures created here belong to the executor.
+const lua_CFunction* own_functions(int* count);
+
 // Drops every object. Called when the VM dies; makes no Lua calls.
 void reset();
 

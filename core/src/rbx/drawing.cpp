@@ -586,6 +586,18 @@ void install(lua_State* L, RegisterFn register_global) {
     register_global(L, "set_render_property", l_set_render_property);
 }
 
+const lua_CFunction* own_functions(int* count) {
+    static const lua_CFunction kFunctions[] = {
+        l_new,       l_destroy,      l_tostring,
+        l_index,     l_newindex,     l_clear_cache,
+        l_is_render_obj, l_get_render_property, l_set_render_property,
+    };
+    if (count) {
+        *count = static_cast<int>(sizeof(kFunctions) / sizeof(kFunctions[0]));
+    }
+    return kFunctions;
+}
+
 void reset() {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     for (const auto& object : g_objects) {

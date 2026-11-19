@@ -852,19 +852,79 @@ int inspect_module(lua_State* L) {
     return 1;
 }
 
+// Trace-only: dump the pointer-shaped fields of every ModuleScript instance
+// that still has a userdata. Loaded and unloaded modules differ in the module
+// cache pointer, which is what the engine consults on a require cache hit.
+void trace_module_state_fields(lua_State* L) {
+    if (!env_trace()) {
+        return;
+    }
+    collect_gc_type(L, LUA_TUSERDATA);
+    const int pool = lua_gettop(L);
+    const int count = static_cast<int>(lua_objlen(L, pool));
+    for (int index = 1; index <= count; ++index) {
+        const int base = lua_gettop(L);
+        lua_rawgeti(L, pool, index);
+        if (std::strcmp(luaL_typename(L, -1), "Instance") != 0) {
+            lua_settop(L, base);
+            continue;
+        }
+        lua_getfield(L, -1, "ClassName");
+        const bool module = lua_isstring(L, -1) &&
+                            std::strcmp(lua_tostring(L, -1), "ModuleScript") == 0;
+        lua_pop(L, 1);
+        if (!module) {
+            lua_settop(L, base);
+            continue;
+        }
+        void** slot = static_cast<void**>(lua_touserdata(L, -1));
+        const auto raw = slot && *slot
+                             ? reinterpret_cast<std::uintptr_t>(*slot)
+                             : 0;
+        lua_getfield(L, -1, "Name");
+        const char* name = lua_isstring(L, -1) ? lua_tostring(L, -1) : "?";
+        zend::logf("env.module_state: '%s' raw=%p", name,
+                   reinterpret_cast<void*>(raw));
+        lua_pop(L, 1);
+        for (std::uintptr_t off = 0x100; off <= 0x1E0; off += 8) {
+            std::uintptr_t pointer = 0;
+            if (!read_ptr(raw + off, pointer) || !is_user_ptr(pointer)) {
+                continue;
+            }
+            std::uint32_t head = 0;
+            std::uintptr_t control = 0;
+            read(pointer, head);
+            read_ptr(raw + off + 8, control);
+            zend::logf("env.module_state:   +0x%03llX -> %p (head=%u next=%p)",
+                       static_cast<unsigned long long>(off),
+                       reinterpret_cast<void*>(pointer),
+                       static_cast<unsigned>(head),
+                       reinterpret_cast<void*>(control));
+        }
+        lua_settop(L, base);
+    }
+    lua_settop(L, pool - 1);
+}
+
 int getloadedmodules(lua_State* L) {
+    trace_module_state_fields(L);
     lua_newtable(L);
     const int out = lua_gettop(L);
 
     collect_gc_type(L, LUA_TFUNCTION);
     const int pool = lua_gettop(L);
 
+    // One inspector closure for the whole scan. Pushing a fresh C closure per
+    // inspected function multiplied the GC population on every call.
+    lua_pushcfunction(L, inspect_module, "inspect_module");
+    const int inspector = lua_gettop(L);
+
     std::unordered_set<const void*> seen;
     std::uintptr_t kept = 0;
     const int count = static_cast<int>(lua_objlen(L, pool));
     for (int index = 1; index <= count; ++index) {
         const int base = lua_gettop(L);
-        lua_pushcfunction(L, inspect_module, "inspect_module");
+        lua_pushvalue(L, inspector);
         lua_rawgeti(L, pool, index);
         if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_isuserdata(L, -1)) {
             void** slot = static_cast<void**>(lua_touserdata(L, -1));
@@ -1694,9 +1754,18 @@ bool push_cached_instance(lua_State* L, std::uintptr_t raw);
 // would make the engine treat an adjacent word as the control block.
 bool push_instance_raw(lua_State* L, void* argument) noexcept;
 
+// The engine weak binding is the authoritative "this thread runs this script"
+// source. Hold the locked shared_ptr instead of a bare pointer: scripts that
+// have no cached userdata (destroyed scripts are the common case) can only be
+// surfaced by handing that real control block to the instance bridge later.
 struct ScriptPointerScan {
     lua_State* L;
-    std::unordered_set<std::uintptr_t>* scripts;
+    std::unordered_set<std::uintptr_t>* seen;
+    std::vector<std::shared_ptr<uintptr_t>>* scripts;
+    int threads = 0;
+    int with_userdata = 0;
+    int expired = 0;
+    int other_vm = 0;
 };
 
 bool script_pointer_visitor(void* raw, lua_Page*, GCObject* gco) {
@@ -1707,24 +1776,43 @@ bool script_pointer_visitor(void* raw, lua_Page*, GCObject* gco) {
     }
 
     auto* thread = reinterpret_cast<lua_State*>(gco);
-    if (!thread->userdata || thread->userdata->script.expired()) {
+    ++scan->threads;
+    if (!thread->userdata) {
+        return false;
+    }
+    ++scan->with_userdata;
+    if (thread->userdata->script.expired()) {
+        ++scan->expired;
         return false;
     }
     if (thread->global->mainthread != L->global->mainthread) {
+        ++scan->other_vm;
+        if (env_trace()) {
+            auto other = thread->userdata->script.lock();
+            zend::logf("env.runscripts.other_vm: thread=%p script=%p",
+                       reinterpret_cast<void*>(thread),
+                       reinterpret_cast<void*>(other.get()));
+        }
         return false;
     }
 
     auto locked = thread->userdata->script.lock();
     const auto script = reinterpret_cast<std::uintptr_t>(locked.get());
-    if (script) {
-        scan->scripts->insert(script);
+    if (script && scan->seen->insert(script).second) {
+        if (env_trace()) {
+            zend::logf("env.runscripts.binding: thread=%p script=%p",
+                       reinterpret_cast<void*>(thread),
+                       reinterpret_cast<void*>(script));
+        }
+        scan->scripts->push_back(std::move(locked));
     }
     return false;
 }
 
-std::unordered_set<std::uintptr_t> running_script_pointers(lua_State* L) {
-    std::unordered_set<std::uintptr_t> scripts;
-    ScriptPointerScan scan{L, &scripts};
+std::vector<std::shared_ptr<uintptr_t>> running_script_pointers(lua_State* L) {
+    std::vector<std::shared_ptr<uintptr_t>> scripts;
+    std::unordered_set<std::uintptr_t> seen;
+    ScriptPointerScan scan{L, &seen, &scripts};
 
     lua_rawcheckstack(L, 1);
     luaC_threadbarrier(L);
@@ -1734,6 +1822,12 @@ std::unordered_set<std::uintptr_t> running_script_pointers(lua_State* L) {
     luaM_visitgco(L, &scan, script_pointer_visitor);
     L->global->GCthreshold = threshold;
 
+    if (env_trace()) {
+        zend::logf("env.runscripts.scan: threads=%d userdata=%d expired=%d "
+                   "other_vm=%d scripts=%d",
+                   scan.threads, scan.with_userdata, scan.expired,
+                   scan.other_vm, static_cast<int>(scripts.size()));
+    }
     return scripts;
 }
 
@@ -1862,21 +1956,27 @@ int getrunningscripts(lua_State* L) {
 
     // A real script keeps its instance in the thread's RobloxExtraSpace even
     // after its `script` global is nil or reassigned, so merge that view in.
-    // Only instances the engine already caches can be materialised safely.
-    const auto scripts = running_script_pointers(L);
-    for (const std::uintptr_t pointer : scripts) {
+    // Destroyed scripts no longer have a cached userdata, so push the locked
+    // binding through the instance bridge.
+    auto scripts = running_script_pointers(L);
+    for (auto& locked : scripts) {
+        const auto pointer = reinterpret_cast<std::uintptr_t>(locked.get());
         if (!pointer || seen.contains(pointer)) {
             continue;
         }
-        if (!push_cached_instance(L, pointer)) {
+        const int before_push = lua_gettop(L);
+        if (!push_instance_raw(L, &locked) ||
+            lua_gettop(L) != before_push + 1 || !lua_isuserdata(L, -1) ||
+            std::strcmp(luaL_typename(L, -1), "Instance") != 0) {
+            lua_settop(L, before_push);
             continue;
         }
-        if (lua_isuserdata(L, -1)) {
-            seen.insert(pointer);
-            lua_rawseti(L, out, ++count);
-        } else {
-            lua_pop(L, 1);
+        if (instance_raw_pointer(L, -1) != pointer) {
+            lua_settop(L, before_push);
+            continue;
         }
+        seen.insert(pointer);
+        lua_rawseti(L, out, ++count);
     }
 
     if (env_trace()) {

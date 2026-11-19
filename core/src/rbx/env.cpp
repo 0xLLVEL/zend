@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -9917,6 +9919,8 @@ struct WebSocketSocket {
 
     std::mutex send_mutex;
     std::mutex queue_mutex;
+    std::mutex state_mutex;
+    std::condition_variable state_cv;
     std::deque<std::string> outbox;
     std::deque<std::string> inbox;
 
@@ -10057,10 +10061,14 @@ void websocket_worker(std::shared_ptr<WebSocketSocket> socket,
                       std::wstring host, std::wstring path, INTERNET_PORT port,
                       bool secure) {
     if (!websocket_handshake(*socket, host, path, port, secure)) {
-        std::lock_guard<std::mutex> lock(socket->queue_mutex);
-        socket->closed.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(socket->queue_mutex);
+            socket->closed.store(true, std::memory_order_release);
+        }
+        socket->state_cv.notify_all();
         return;
     }
+    socket->state_cv.notify_all();
 
     std::string partial;
     char buffer[8192];
@@ -10123,6 +10131,7 @@ void websocket_worker(std::shared_ptr<WebSocketSocket> socket,
     }
 
     socket->closed.store(true, std::memory_order_release);
+    socket->state_cv.notify_all();
 }
 
 std::shared_ptr<WebSocketSocket> find_websocket(int id) {
@@ -10202,6 +10211,27 @@ int websocket_connect(lua_State* L) {
     std::thread(websocket_worker, socket, host, path,
                 static_cast<INTERNET_PORT>(components.nPort), secure)
         .detach();
+
+    // The public API is synchronous: the caller gets a socket that is already
+    // open, so a timeout on the first received message does not include the
+    // TLS/handshake time. The worker still owns the receive loop.
+    {
+        std::unique_lock<std::mutex> lock(socket->state_mutex);
+        socket->state_cv.wait_for(lock, std::chrono::seconds(10), [&] {
+            return socket->connected.load(std::memory_order_acquire) ||
+                   socket->closed.load(std::memory_order_acquire);
+        });
+    }
+
+    if (!socket->connected.load(std::memory_order_acquire)) {
+        socket->closing.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(g_ws_mutex);
+            g_ws_sockets.erase(id);
+        }
+        lua_pushnil(L);
+        return 1;
+    }
 
     lua_pushinteger(L, id);
     return 1;
@@ -10393,6 +10423,9 @@ function WebSocket.connect(url)
     end
 
     local id = __zend_ws_connect(url)
+    if not id then
+        error("WebSocket connection failed", 2)
+    end
     local self = setmetatable({
         _id = id,
         _closed = false,

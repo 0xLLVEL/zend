@@ -136,9 +136,18 @@ global_State* g_shared_registry_global = nullptr;
 // proto itself and is equally immune to address reuse.
 std::unordered_set<lua_CFunction> g_own_c_functions;
 
+// Defined with the hook bookkeeping below. A game closure whose body was
+// replaced by a hook still belongs to the game, even though its function
+// pointer/proto now points at one of our dispatchers.
+bool hooked_closure_original_is_wrapper(Closure* closure, bool* is_wrapper);
+
 bool closure_is_executor_owned(Closure* closure) {
     if (!closure) {
         return false;
+    }
+    bool original_is_wrapper = false;
+    if (hooked_closure_original_is_wrapper(closure, &original_is_wrapper)) {
+        return original_is_wrapper;
     }
     if (closure->isC) {
         return g_own_c_functions.contains(closure->c.f);
@@ -1250,12 +1259,20 @@ int rbx_require(lua_State* L) {
                         lua_pop(L, 1);
                     }
                 }
+
+                module_cache_update(
+                    L, 1, 2, 0,
+                    "Requested module experienced an error while loading");
+                luaL_error(
+                    L, "Requested module experienced an error while loading");
             }
 
-            module_cache_update(
-                L, 1, 2, 0,
-                "Requested module experienced an error while loading");
-            luaL_error(L, "Requested module experienced an error while loading");
+            // A runtime ModuleScript without Source has nothing to compile
+            // here. Let the engine handle it exactly as it would any other
+            // empty module; the result decides the cache status below.
+            if (env_trace()) {
+                zend::logf("env.require: no source, delegating to engine");
+            }
         }
 
         // The engine can run this module (loaded cache record or shipped
@@ -1467,17 +1484,23 @@ std::string instance_class_name(lua_State* L, int index);
 std::uintptr_t instance_raw_pointer(lua_State* L, int index);
 
 // The engine keeps a module record per ModuleScript once require() has run.
-// A never-required module has a null (or non-pointer) field here. State 2 is
-// the engine's "completed" value; 1 (running) and 3 (errored) are explicitly
-// excluded because getloadedmodules only reports completed executions.
-bool module_is_loaded(std::uintptr_t script) {
+// A never-required module has a null (or non-pointer) field here. The record's
+// first word is the module state; the completed state varies by client build,
+// so the loaded check accepts the whole small enum range instead of pinning a
+// single value that a build can silently move past.
+bool module_record_state(std::uintptr_t script, std::uint32_t& state) {
+    state = 0;
     std::uintptr_t module = 0;
     if (!read_ptr(script + off::kModuleScriptModule, module) ||
         !is_user_ptr(module)) {
         return false;
     }
+    return read(module, state);
+}
+
+bool module_is_loaded(std::uintptr_t script) {
     std::uint32_t state = 0;
-    return read(module, state) && state == 2;
+    return module_record_state(script, state) && state >= 1 && state <= 8;
 }
 
 // True when this ModuleScript userdata belongs to a completed require. Engine
@@ -1677,9 +1700,13 @@ int getloadedmodules(lua_State* L) {
                    modules);
         for (int index = 1; index <= modules && index <= 60; ++index) {
             lua_rawgeti(L, out, index);
+            const std::uintptr_t raw = instance_raw_pointer(L, -1);
+            std::uint32_t state = 0;
+            const bool has_state = raw && module_record_state(raw, state);
             lua_getfield(L, -1, "Name");
             const char* name = lua_isstring(L, -1) ? lua_tostring(L, -1) : "?";
-            zend::logf("env.getloadedmodules:   [%d] %s", index, name);
+            zend::logf("env.getloadedmodules:   [%d] %s state=%u", index, name,
+                       has_state ? state : 0);
             lua_pop(L, 2);
         }
     }
@@ -6856,6 +6883,18 @@ struct NewCClosureRecord {
 std::unordered_map<Closure*, HookRecord> g_hooks;
 std::unordered_map<Closure*, NewCClosureRecord> g_newc;
 std::unordered_set<Closure*> g_wrapped;
+
+bool hooked_closure_original_is_wrapper(Closure* closure, bool* is_wrapper) {
+    if (!closure || !is_wrapper) {
+        return false;
+    }
+    auto it = g_hooks.find(closure);
+    if (it == g_hooks.end() || it->second.hook_ref == LUA_NOREF) {
+        return false;
+    }
+    *is_wrapper = it->second.original_is_wrapper;
+    return true;
+}
 
 Closure* to_closure(lua_State* L, int index) {
     luaL_checktype(L, index, LUA_TFUNCTION);

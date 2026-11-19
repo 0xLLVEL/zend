@@ -129,6 +129,19 @@ global_State* g_genv_global = nullptr;
 int g_shared_registry_ref = LUA_NOREF;
 global_State* g_shared_registry_global = nullptr;
 
+// Per-name bookkeeping for the canonical shared table. The install thread
+// belongs to the client's core-script layer, whose `_G`/`shared` may be a
+// different object from the one the game's scripts share; the table with the
+// most script environments wins once those scripts exist. A deliberate
+// rebind through getgenv()/getrenv() disables that follow behaviour.
+struct SharedNameState {
+    const void* engine_table = nullptr;
+    bool user_rebound = false;
+};
+std::unordered_map<std::string, SharedNameState> g_shared_states;
+std::unordered_map<std::string, std::chrono::steady_clock::time_point>
+    g_shared_scan_times;
+
 // C functions installed by the executor. Ownership is structural: a C closure
 // is ours exactly when its function pointer is one we install, so a recycled
 // Closure allocation can never inherit ownership from a dead one. Lua closures
@@ -374,6 +387,8 @@ int push_shared_registry(lua_State* L) {
     if (g_shared_registry_global != L->global) {
         g_shared_registry_global = L->global;
         g_shared_registry_ref = LUA_NOREF;
+        g_shared_states.clear();
+        g_shared_scan_times.clear();
     }
     if (g_shared_registry_ref != LUA_NOREF) {
         lua_getref(L, g_shared_registry_ref);
@@ -387,35 +402,115 @@ int push_shared_registry(lua_State* L) {
     return lua_gettop(L);
 }
 
-// `_G` and `shared` are VM-wide tables in Roblox: the game, every script and
-// the executor all read the same object. Pick one canonical table per VM and
-// write that exact object into the client globals. A table that differs from
-// the canonical one is a deliberate rebound (getrenv()._G = {}) and replaces
-// it; values are never merged, because merging would resurrect keys the
-// script deleted.
+// Roblox keeps `_G` and `shared` as raw fields on every script thread's own
+// environment; the global table the executor proxies does not carry them. The
+// engine table is therefore invisible through getrenv() until it is adopted,
+// and a freshly created table silently diverges from every game write.
+struct EngineSharedScan {
+    lua_State* L;
+    TString* key;
+    const void* watch;
+    std::unordered_map<LuaTable*, int> counts;
+    int threads = 0;
+    int usable = 0;
+    int watch_hits = 0;
+};
+
+bool engine_shared_visitor(void* raw, lua_Page*, GCObject* gco) {
+    auto* scan = static_cast<EngineSharedScan*>(raw);
+    lua_State* L = scan->L;
+    if (isdead(L->global, gco) || gco->gch.tt != LUA_TTHREAD) {
+        return false;
+    }
+
+    auto* thread = reinterpret_cast<lua_State*>(gco);
+    if (thread == L || !thread->gt || thread->global != L->global) {
+        return false;
+    }
+    ++scan->threads;
+
+    // Executor threads carry the executor's proxy environment; the game's own
+    // scripts run at a lower identity and are the source of truth.
+    if (thread->userdata && thread->userdata->identity >= 8) {
+        return false;
+    }
+
+    const TValue* value = luaH_getstr(thread->gt, scan->key);
+    if (value->tt != LUA_TTABLE) {
+        return false;
+    }
+    if (scan->watch == hvalue(value)) {
+        ++scan->watch_hits;
+    }
+    ++scan->counts[hvalue(value)];
+    ++scan->usable;
+    return false;
+}
+
+// Pushes the table the game's scripts actually see for `name`. The table that
+// appears on the most script threads wins, which is the shared client-level
+// object rather than a per-script copy. `watch` reports how many threads still
+// use the caller's current table so a tie cannot flip the canonical object.
+bool push_engine_shared_table(lua_State* L, const char* name, const void* watch,
+                              int* hits, int* watch_hits) {
+    EngineSharedScan scan{L, luaS_new(L, name), watch};
+
+    lua_rawcheckstack(L, 1);
+    luaC_threadbarrier(L);
+
+    const std::size_t threshold = L->global->GCthreshold;
+    L->global->GCthreshold = SIZE_MAX;
+    luaM_visitgco(L, &scan, engine_shared_visitor);
+    L->global->GCthreshold = threshold;
+
+    LuaTable* best = nullptr;
+    int best_count = 0;
+    for (const auto& entry : scan.counts) {
+        if (entry.second > best_count) {
+            best = entry.first;
+            best_count = entry.second;
+        }
+    }
+    if (env_trace()) {
+        zend::logf("env.shared_scan: name=%s threads=%d usable=%d candidates=%d "
+                   "best=%p hits=%d watch=%p watch_hits=%d",
+                   name, scan.threads, scan.usable,
+                   static_cast<int>(scan.counts.size()),
+                   reinterpret_cast<void*>(best), best_count,
+                   watch, scan.watch_hits);
+    }
+    if (hits) {
+        *hits = best_count;
+    }
+    if (watch_hits) {
+        *watch_hits = scan.watch_hits;
+    }
+    if (!best) {
+        return false;
+    }
+    push_gcobject(L, reinterpret_cast<GCObject*>(best));
+    return true;
+}
+
+// `_G` and `shared` exist as VM-wide tables in Roblox, but the executor must
+// not share its `_G` with the game: UNC asserts `_G ~= getrenv()._G`, and a
+// shared table turns every executor write into a detectable game write. Pick
+// the game's canonical table per VM and publish it into the client globals
+// only. A table that differs from the canonical one is a deliberate rebind
+// (getrenv()._G = {}) and replaces it; values are never merged, because
+// merging would resurrect keys the script deleted.
 //
-// The executor globals (getgenv()) deliberately do not store a copy: their
-// __index already points at the client globals, so leaving the key out makes
-// `_G` follow any later rebind immediately. A raw key in the executor globals
-// can only come from an explicit `getgenv()._G = ...`, which is propagated
-// once and then removed again so it cannot shadow future client rebinds.
+// getgenv() is never a candidate and never gets a key removed: its `_G` is a
+// private table created at install and getgenv() itself has no side effects.
 void publish_shared_global(lua_State* L, int env, const char* name) {
     env = lua_absindex(L, env);
     const int base_top = lua_gettop(L);
     lua_rawcheckstack(L, 16);
 
-    int genv = 0;
-    if (g_genv_global == L->global && g_genv_ref != LUA_NOREF) {
-        lua_getref(L, g_genv_ref);
-        if (lua_istable(L, -1)) {
-            genv = lua_gettop(L);
-        } else {
-            lua_pop(L, 1);
-        }
-    }
-
     // Tables that receive the canonical object, highest priority first. The
-    // executor globals are excluded on purpose (see above).
+    // executor globals never receive the game object: `_G` is private to the
+    // executor (UNC: `_G ~= getrenv()._G`) and getgenv() must stay free of
+    // publish side effects.
     lua_newtable(L);
     const int candidates = lua_gettop(L);
     int count = 0;
@@ -424,8 +519,14 @@ void publish_shared_global(lua_State* L, int env, const char* name) {
         if (!lua_istable(L, table)) {
             return;
         }
-        if (genv && lua_rawequal(L, table, genv)) {
-            return;
+        if (g_genv_global == L->global && g_genv_ref != LUA_NOREF) {
+            lua_getref(L, g_genv_ref);
+            const bool is_genv = lua_istable(L, -1) &&
+                                 lua_rawequal(L, -1, table) != 0;
+            lua_pop(L, 1);
+            if (is_genv) {
+                return;
+            }
         }
         for (int i = 1; i <= count; ++i) {
             lua_rawgeti(L, candidates, i);
@@ -455,7 +556,33 @@ void publish_shared_global(lua_State* L, int env, const char* name) {
     }
     lua_settop(L, registry - 1);
 
+    SharedNameState& state = g_shared_states[name];
+
+    // Re-scan while the canonical table is still engine-derived. At install the
+    // hook thread belongs to the client's early/core layer, whose `_G` may not
+    // be the object the game's scripts share once they start. The scan is
+    // throttled because getrenv() is frequently called from render loops.
+    int engine_ref = LUA_NOREF;
+    int engine_hits = 0;
+    int watch_hits = 0;
+    if (base_ref == LUA_NOREF || !state.user_rebound) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto last = g_shared_scan_times.find(name);
+        const bool due =
+            last == g_shared_scan_times.end() ||
+            now - last->second >= std::chrono::milliseconds(500);
+        if (due) {
+            g_shared_scan_times[name] = now;
+            if (push_engine_shared_table(L, name, state.engine_table,
+                                         &engine_hits, &watch_hits)) {
+                engine_ref = lua_ref(L, -1);
+                lua_pop(L, 1);
+            }
+        }
+    }
+
     int chosen_ref = LUA_NOREF;
+    bool explicit_rebind = false;
     const auto is_rebound = [&](int value) {
         if (!lua_istable(L, value)) {
             return false;
@@ -469,18 +596,8 @@ void publish_shared_global(lua_State* L, int env, const char* name) {
         return differs;
     };
 
-    // An explicit write through getgenv() wins over everything else.
-    if (genv) {
-        lua_pushstring(L, name);
-        lua_rawget(L, genv);
-        if (is_rebound(lua_gettop(L))) {
-            chosen_ref = lua_ref(L, -1);
-        }
-        lua_pop(L, 1);
-    }
-
-    // The first table that differs from the stored canonical is the newest
-    // replacement; later candidates are stale copies and must not win back.
+    // An explicit write through a published environment (getrenv()) wins over
+    // everything else.
     for (int i = 1; i <= count && chosen_ref == LUA_NOREF; ++i) {
         lua_rawgeti(L, candidates, i);
         const int table = lua_gettop(L);
@@ -488,23 +605,62 @@ void publish_shared_global(lua_State* L, int env, const char* name) {
         lua_rawget(L, table);
         if (is_rebound(lua_gettop(L))) {
             chosen_ref = lua_ref(L, -1);
+            explicit_rebind = true;
         }
         lua_pop(L, 2);
     }
 
-    if (chosen_ref == LUA_NOREF && base_ref != LUA_NOREF) {
-        lua_getref(L, base_ref);
-        chosen_ref = lua_ref(L, -1);
-        lua_pop(L, 1);
+    if (explicit_rebind) {
+        state.user_rebound = true;
+        state.engine_table = nullptr;
     }
-    if (chosen_ref == LUA_NOREF && push_client_global_table(L, name)) {
+
+    // Adopt the scanned table only when it represents more of the game than
+    // the current canonical object. A fallback table (or one captured from the
+    // early core-script layer) is replaced once the game's scripts exist.
+    const auto take_engine = [&]() -> bool {
+        if (state.user_rebound || engine_ref == LUA_NOREF) {
+            return false;
+        }
+        lua_getref(L, engine_ref);
+        LuaTable* best = hvalue(luaA_toobject(L, -1));
+        const bool different = best != state.engine_table;
+        const bool better = state.engine_table == nullptr || watch_hits == 0 ||
+                            engine_hits > watch_hits;
+        lua_pop(L, 1);
+        if (!different || !better) {
+            return false;
+        }
+        chosen_ref = engine_ref;
+        engine_ref = LUA_NOREF;
+        state.engine_table = best;
+        return true;
+    };
+
+    if (chosen_ref == LUA_NOREF && base_ref != LUA_NOREF) {
+        if (!take_engine()) {
+            lua_getref(L, base_ref);
+            chosen_ref = lua_ref(L, -1);
+            lua_pop(L, 1);
+        }
+    }
+    // First use: adopt the table the game's scripts already share instead of
+    // creating an empty one, otherwise every write made by the game (and every
+    // key it expects to read back) is lost.
+    if (chosen_ref == LUA_NOREF && !take_engine() &&
+        push_client_global_table(L, name)) {
         chosen_ref = lua_ref(L, -1);
         lua_pop(L, 1);
+        state.engine_table = nullptr;
     }
     if (chosen_ref == LUA_NOREF) {
         lua_newtable(L);
         chosen_ref = lua_ref(L, -1);
         lua_pop(L, 1);
+        state.engine_table = nullptr;
+    }
+    if (engine_ref != LUA_NOREF) {
+        lua_unref(L, engine_ref);
     }
 
     const int reg = push_shared_registry(L);
@@ -536,21 +692,6 @@ void publish_shared_global(lua_State* L, int env, const char* name) {
         lua_pop(L, 1);
     }
 
-    // Drop any executor-globals copy so the __index chain keeps following the
-    // client table.
-    if (genv) {
-        const int readonly = lua_getreadonly(L, genv);
-        if (readonly) {
-            lua_setreadonly(L, genv, 0);
-        }
-        lua_pushstring(L, name);
-        lua_pushnil(L);
-        lua_rawset(L, genv);
-        if (readonly) {
-            lua_setreadonly(L, genv, 1);
-        }
-    }
-
     if (base_ref != LUA_NOREF) {
         lua_unref(L, base_ref);
     }
@@ -561,11 +702,6 @@ void publish_shared_global(lua_State* L, int env, const char* name) {
 int getgenv(lua_State* L) {
     if (g_genv_global == L->global && g_genv_ref != LUA_NOREF) {
         lua_getref(L, g_genv_ref);
-        if (lua_istable(L, -1)) {
-            const int env = lua_gettop(L);
-            publish_shared_global(L, env, "_G");
-            publish_shared_global(L, env, "shared");
-        }
         if (env_trace()) {
             zend::logf("env.getgenv: keys=%d", count_table_keys(L, -1));
         }
@@ -11300,11 +11436,17 @@ void install(lua_State* L) {
 
     drawing::install(L, set_function);
 
-    // `_G` and `shared` are VM-wide tables in Roblox: every script, game or
-    // executor, reads the same objects. Point the executor environment at the
-    // client's tables so writes are shared exactly like the real client.
+    // Publish the game's own tables into the real client globals. The executor
+    // globals are skipped, and `_G` below is replaced by a private table.
     publish_shared_global(L, LUA_GLOBALSINDEX, "_G");
     publish_shared_global(L, LUA_GLOBALSINDEX, "shared");
+
+    // The executor's `_G` is its own table, created once and shared by every
+    // executor thread. Game scripts never see writes made through it, and
+    // getrenv()._G stays the game's object.
+    lua_pushstring(L, "_G");
+    lua_newtable(L);
+    lua_rawset(L, LUA_GLOBALSINDEX);
 
     // Put the per-chunk proxy back. The shared table remains anchored by the
     // registry ref and, from now on, by the proxy metatable's __index.

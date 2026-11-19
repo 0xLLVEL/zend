@@ -906,6 +906,61 @@ void trace_module_state_fields(lua_State* L) {
     lua_settop(L, pool - 1);
 }
 
+std::string instance_class_name(lua_State* L, int index);
+std::uintptr_t instance_raw_pointer(lua_State* L, int index);
+
+// The engine keeps a module record per ModuleScript once require() has run.
+// A never-required module has a null (or non-pointer) field here, so this is
+// the source of truth even when the module closure has been collected.
+bool module_is_loaded(std::uintptr_t script) {
+    std::uintptr_t module = 0;
+    if (!read_ptr(script + off::kModuleScriptModule, module) ||
+        !is_user_ptr(module)) {
+        return false;
+    }
+    std::uint32_t state = 0;
+    return read(module, state) && state >= 1 && state <= 8;
+}
+
+// Walks the DataModel so loaded modules are found without relying on a cached
+// userdata or a surviving closure.
+void collect_loaded_modules_from_tree(lua_State* L, int out,
+                                      std::unordered_set<const void*>& seen,
+                                      std::uintptr_t& kept) {
+    lua_getglobal(L, "game");
+    if (!lua_isuserdata(L, -1)) {
+        lua_pop(L, 1);
+        return;
+    }
+    lua_getfield(L, -1, "GetDescendants");
+    if (!lua_isfunction(L, -1)) {
+        lua_pop(L, 2);
+        return;
+    }
+    lua_pushvalue(L, -3);
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+        lua_pop(L, 2);
+        return;
+    }
+
+    const int table = lua_gettop(L);
+    const int count = static_cast<int>(lua_objlen(L, table));
+    for (int index = 1; index <= count; ++index) {
+        lua_rawgeti(L, table, index);
+        if (lua_isuserdata(L, -1)) {
+            const std::uintptr_t raw = instance_raw_pointer(L, -1);
+            if (raw && module_is_loaded(raw) &&
+                instance_class_name(L, -1) == "ModuleScript" &&
+                seen.insert(reinterpret_cast<const void*>(raw)).second) {
+                lua_pushvalue(L, -1);
+                lua_rawseti(L, out, static_cast<int>(++kept));
+            }
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 2);
+}
+
 int getloadedmodules(lua_State* L) {
     trace_module_state_fields(L);
     lua_newtable(L);
@@ -936,6 +991,8 @@ int getloadedmodules(lua_State* L) {
         }
         lua_settop(L, base);
     }
+
+    collect_loaded_modules_from_tree(L, out, seen, kept);
 
     lua_settop(L, out);
     if (env_trace()) {
@@ -3186,6 +3243,7 @@ constexpr std::uintptr_t kClassDescriptorOffset = 0x18;
 constexpr std::uintptr_t kPropertyEntrySize = 0x10;
 constexpr std::uint32_t kPropertyScriptableBit = 0x10;
 constexpr std::uintptr_t kPropertyBitFlags = 0xAC;
+constexpr std::uintptr_t kPropertyInstanceOffset = 0x80;
 constexpr std::uintptr_t kPropertyTypeInfo = 0x70;
 constexpr std::uintptr_t kPropertyTypeInfoAlt = 0x68;
 constexpr std::uintptr_t kPropertyTypeId = 0x30;
@@ -3421,37 +3479,205 @@ bool lookup_scriptable_override(std::uintptr_t instance, const char* name,
 // the verified offset dump (dump/offsets_rbx.hpp). The property descriptor
 // getter is deliberately not used: calling it for Terrain.MaterialColors has
 // crashed the client, and the descriptor type must not be rewritten either.
+// `property + 0x80` is the per-descriptor instance field offset (dump:
+// Property::InstanceOffset). BinaryString members are MSVC std::string values,
+// so the payload is either inline (SSO) or behind a heap pointer.
+bool read_msvc_string(std::uintptr_t address, std::string& out) {
+    std::uint64_t length = 0;
+    std::uint64_t capacity = 0;
+    if (!read(address + 0x10, length) || !read(address + 0x18, capacity)) {
+        return false;
+    }
+    if (length > (64u << 20) || length > capacity) {
+        return false;
+    }
+    std::uintptr_t data = address;
+    if (capacity > 0xF && (!read_ptr(address, data) || !is_user_ptr(data))) {
+        return false;
+    }
+    if (length == 0) {
+        out.clear();
+        return true;
+    }
+    out.resize(static_cast<std::size_t>(length));
+    return try_read_bytes(data, out.data(), out.size());
+}
+
+// Tags is a SharedString with no instance offset: the engine's Lua bridge has
+// no converter for that type and the descriptor getter must not be called.
+// Ask the engine for the tag list through its public method and serialize it
+// the way the property stores it (null-separated tag names).
+bool collect_tags(lua_State* L, int index, std::vector<std::string>& tags) {
+    index = lua_absindex(L, index);
+    lua_getfield(L, index, "GetTags");
+    if (!lua_isfunction(L, -1)) {
+        lua_pop(L, 1);
+        return false;
+    }
+    lua_pushvalue(L, index);
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK || !lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return false;
+    }
+    const int count = static_cast<int>(lua_objlen(L, -1));
+    tags.clear();
+    for (int tag = 1; tag <= count; ++tag) {
+        lua_rawgeti(L, -1, tag);
+        std::size_t length = 0;
+        const char* text = lua_tolstring(L, -1, &length);
+        if (text && length > 0) {
+            tags.emplace_back(text, length);
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+    return true;
+}
+
+bool push_tags_property(lua_State* L, int index) {
+    std::vector<std::string> tags;
+    if (!collect_tags(L, index, tags)) {
+        return false;
+    }
+    std::string blob;
+    for (const auto& tag : tags) {
+        blob.append(tag);
+        blob.push_back('\0');
+    }
+    lua_pushlstring(L, blob.data(), blob.size());
+    return true;
+}
+
+bool call_tag_method(lua_State* L, int index, const char* method,
+                     const std::string& tag) {
+    index = lua_absindex(L, index);
+    lua_getfield(L, index, method);
+    if (!lua_isfunction(L, -1)) {
+        lua_pop(L, 1);
+        return false;
+    }
+    lua_pushvalue(L, index);
+    lua_pushlstring(L, tag.data(), tag.size());
+    const bool ok = lua_pcall(L, 2, 0, 0) == LUA_OK;
+    if (!ok) {
+        lua_pop(L, 1);
+    }
+    return ok;
+}
+
+bool sync_tags_property(lua_State* L, int index, const char* data,
+                        std::size_t length) {
+    std::vector<std::string> wanted;
+    std::unordered_set<std::string> wanted_set;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i <= length; ++i) {
+        if (i != length && data[i] != '\0') {
+            continue;
+        }
+        if (i > start) {
+            std::string tag(data + start, i - start);
+            if (wanted_set.insert(tag).second) {
+                wanted.push_back(std::move(tag));
+            }
+        }
+        start = i + 1;
+    }
+
+    std::vector<std::string> current;
+    if (!collect_tags(L, index, current)) {
+        return false;
+    }
+    const std::unordered_set<std::string> current_set(current.begin(),
+                                                      current.end());
+    for (const auto& tag : current) {
+        if (!wanted_set.contains(tag) &&
+            !call_tag_method(L, index, "RemoveTag", tag)) {
+            return false;
+        }
+    }
+    for (const auto& tag : wanted) {
+        if (!current_set.contains(tag) &&
+            !call_tag_method(L, index, "AddTag", tag)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool push_binary_string_field(lua_State* L, int index, std::uintptr_t instance,
-                              const char* name) {
+                              std::uintptr_t property, const char* name,
+                              bool shared_string) {
+    if (!instance) {
+        return false;
+    }
+
     // Terrain.MaterialColors is the only NotScriptable BinaryString in the API
-    // dump, and its payload is a std::vector<std::uint8_t> of RGB triples at
-    // this offset. Nothing else has a verified field here, so everything else
-    // keeps the normal property path.
+    // dump whose payload is a std::vector<std::uint8_t> of RGB triples.
     constexpr std::uintptr_t kTerrainMaterialColors = 0x4A0;
-    if (!instance || !name || std::strcmp(name, "MaterialColors") != 0) {
-        return false;
+    if (name && std::strcmp(name, "MaterialColors") == 0 &&
+        instance_class_name(L, index) == "Terrain") {
+        std::uintptr_t begin = 0;
+        std::uintptr_t end = 0;
+        if (read_ptr(instance + kTerrainMaterialColors, begin) &&
+            read_ptr(instance + kTerrainMaterialColors + 0x8, end) &&
+            is_user_ptr(begin) && end >= begin) {
+            const std::uintptr_t length = end - begin;
+            if (length > 0 && length <= (64u << 20)) {
+                std::string value(static_cast<std::size_t>(length), '\0');
+                if (try_read_bytes(begin, value.data(), value.size())) {
+                    lua_pushlstring(L, value.data(), value.size());
+                    return true;
+                }
+            }
+        }
     }
-    if (instance_class_name(L, index) != "Terrain") {
+
+    if (!property) {
         return false;
     }
 
-    std::uintptr_t begin = 0;
-    std::uintptr_t end = 0;
-    if (!read_ptr(instance + kTerrainMaterialColors, begin) ||
-        !read_ptr(instance + kTerrainMaterialColors + 0x8, end)) {
-        return false;
-    }
-    if (!is_user_ptr(begin) || end < begin) {
-        return false;
-    }
-
-    const std::uintptr_t length = end - begin;
-    if (length == 0 || length > (64u << 20)) {
+    // Every other BinaryString/SharedString property lives in a per-instance
+    // field described by the property descriptor.
+    std::uint32_t offset = 0;
+    if (!read(property + kPropertyInstanceOffset, offset) || offset == 0 ||
+        offset == 0xFFFFFFFFu) {
+        if (env_trace()) {
+            zend::logf("env.binary_string: prop=%s no offset (raw=0x%X)",
+                       name ? name : "?", static_cast<unsigned>(offset));
+        }
         return false;
     }
 
-    std::string value(static_cast<std::size_t>(length), '\0');
-    if (!try_read_bytes(begin, value.data(), value.size())) {
+    // SharedString is a ref-counted object whose std::string payload starts at
+    // +0x10; BinaryString stores the std::string directly in the instance.
+    std::string value;
+    bool ok = false;
+    if (shared_string) {
+        std::uintptr_t object = 0;
+        if (read_ptr(instance + offset, object) && is_user_ptr(object)) {
+            ok = read_msvc_string(object + 0x10, value);
+        }
+        if (!ok) {
+            ok = read_msvc_string(instance + offset, value);
+        }
+    } else {
+        ok = read_msvc_string(instance + offset, value);
+    }
+    if (env_trace()) {
+        zend::logf("env.binary_string: prop=%s shared=%d offset=0x%X ok=%d "
+                   "len=%zu",
+                   name ? name : "?", shared_string ? 1 : 0,
+                   static_cast<unsigned>(offset), ok ? 1 : 0, value.size());
+        std::uintptr_t field = 0;
+        for (std::uintptr_t delta = 0; delta < 0x20; delta += 8) {
+            if (read_ptr(instance + offset + delta, field)) {
+                zend::logf("env.binary_string:   field+0x%llX = %p",
+                           static_cast<unsigned long long>(delta),
+                           reinterpret_cast<void*>(field));
+            }
+        }
+    }
+    if (!ok) {
         return false;
     }
     lua_pushlstring(L, value.data(), value.size());
@@ -3489,8 +3715,16 @@ int gethiddenproperty(lua_State* L) {
                    hidden ? 1 : 0);
     }
 
+    if (instance && name && std::strcmp(name, "Tags") == 0 &&
+        type_id == kTypeSharedString && push_tags_property(L, 1)) {
+        lua_pushboolean(L, hidden ? 1 : 0);
+        return 2;
+    }
+
     if (type_id == kTypeBinaryString || type_id == kTypeSharedString) {
-        if (instance && push_binary_string_field(L, 1, instance, name)) {
+        if (instance &&
+            push_binary_string_field(L, 1, instance, property, name,
+                                     type_id == kTypeSharedString)) {
             lua_pushboolean(L, hidden ? 1 : 0);
             return 2;
         }
@@ -3589,6 +3823,17 @@ int sethiddenproperty(lua_State* L) {
                    instance_class_name(L, 1).c_str(), name, original_type,
                    hidden ? 1 : 0, luaL_typename(L, 3));
     }
+    if (original_type == kTypeSharedString && std::strcmp(name, "Tags") == 0) {
+        std::size_t length = 0;
+        const char* data = lua_tolstring(L, 3, &length);
+        if (!data || !sync_tags_property(L, 1, data, length)) {
+            lua_pushnil(L);
+            return 1;
+        }
+        lua_pushboolean(L, hidden ? 1 : 0);
+        return 1;
+    }
+
     if (original_type == kTypeBinaryString ||
         original_type == kTypeSharedString) {
         lua_pushnil(L);

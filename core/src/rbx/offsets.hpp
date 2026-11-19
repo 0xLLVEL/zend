@@ -50,6 +50,9 @@ inline constexpr std::uint32_t kScriptContextRequireBypass = 0xC30;
 // +0x18; the fallback scan in fetch_script_bytecode covers layout drift.
 inline constexpr std::uint32_t kLocalScriptBytecode  = 0x178;
 inline constexpr std::uint32_t kModuleScriptBytecode = 0x120;
+// Engine module record: null until require() has prepared/run the module, then
+// a pointer whose first word is the module state (1 running, 2 done, 3 error).
+inline constexpr std::uint32_t kModuleScriptModule = 0x160;
 inline constexpr std::uint32_t kProtectedStringValue = 0x18;
 
 // Script Source fields (dump/offsets_rbx.hpp). Both are refcounted

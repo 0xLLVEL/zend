@@ -3772,6 +3772,7 @@ constexpr std::uintptr_t kPropertyTypeInfoAlt = 0x68;
 constexpr std::uintptr_t kPropertyTypeId = 0x30;
 constexpr int kTypeBinaryString = 30;
 constexpr int kTypeSharedString = 63;
+constexpr const char* kHiddenStringRegistryKey = "__zend_hidden_strings";
 
 struct PropertyLayout {
     bool probed = false;
@@ -4079,6 +4080,78 @@ bool push_tags_property(lua_State* L, int index) {
     return true;
 }
 
+// Some SharedString/BinaryString properties are computed by the engine and
+// have no writable instance field in this build. Rewriting their descriptor
+// type crashes the client, and calling the descriptor accessor is off limits,
+// so keep the value the script wrote in a weak-keyed table and return it on
+// the next read. The instance userdata is the key, so an entry disappears as
+// soon as the instance is collected and cannot leak into a reused address.
+void ensure_hidden_string_table(lua_State* L) {
+    lua_getfield(L, LUA_REGISTRYINDEX, kHiddenStringRegistryKey);
+    if (lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return;
+    }
+    lua_pop(L, 1);
+
+    lua_newtable(L);
+    lua_newtable(L);
+    lua_pushliteral(L, "__mode");
+    lua_pushliteral(L, "k");
+    lua_rawset(L, -3);
+    lua_setmetatable(L, -2);
+    lua_setfield(L, LUA_REGISTRYINDEX, kHiddenStringRegistryKey);
+}
+
+bool get_hidden_string_override(lua_State* L, int index, const char* name,
+                                std::string& out) {
+    if (!name) {
+        return false;
+    }
+    index = lua_absindex(L, index);
+    ensure_hidden_string_table(L);
+
+    lua_getfield(L, LUA_REGISTRYINDEX, kHiddenStringRegistryKey);
+    lua_pushvalue(L, index);
+    lua_rawget(L, -2);
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 2);
+        return false;
+    }
+    lua_getfield(L, -1, name);
+    std::size_t length = 0;
+    const char* text = lua_tolstring(L, -1, &length);
+    const bool found = text != nullptr;
+    if (found) {
+        out.assign(text, length);
+    }
+    lua_pop(L, 3);
+    return found;
+}
+
+void set_hidden_string_override(lua_State* L, int index, const char* name,
+                                const char* data, std::size_t length) {
+    if (!name) {
+        return;
+    }
+    index = lua_absindex(L, index);
+    ensure_hidden_string_table(L);
+
+    lua_getfield(L, LUA_REGISTRYINDEX, kHiddenStringRegistryKey);
+    lua_pushvalue(L, index);
+    lua_rawget(L, -2);
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, index);
+        lua_pushvalue(L, -2);
+        lua_rawset(L, -4);
+    }
+    lua_pushlstring(L, data ? data : "", data ? length : 0);
+    lua_setfield(L, -2, name);
+    lua_pop(L, 2);
+}
+
 bool call_tag_method(lua_State* L, int index, const char* method,
                      const std::string& tag) {
     index = lua_absindex(L, index);
@@ -4288,63 +4361,79 @@ bool push_binary_string_field(lua_State* L, int index, std::uintptr_t instance,
 
     bool ok = offset != 0 && read_payload(offset, shared_string, value);
 
-    // AeroMeshData has no instance offset in its descriptor. The dump names
-    // the PartOperation mesh slots, so inspect those fields and the string
-    // layouts their holders use (SharedString at +0x10, wrapped records at
-    // +0x18). Empty but present payloads are valid and must return "".
+    // AeroMeshData has no instance offset in its descriptor. PartOperation
+    // stores a generated mesh in the dumped mesh slots; MeshPart and the other
+    // TriangleMeshPart classes compute the value from their mesh asset and do
+    // not have those slots. Reading PartOperation offsets on a MeshPart picks
+    // up unrelated strings (including the bridge error buffer), so only scan
+    // the slots on classes that actually own them.
     if (!ok && name && std::strcmp(name, "AeroMeshData") == 0) {
-        constexpr std::uintptr_t kCandidates[] = {0x350, 0x388, 0x318, 0x378};
-        bool saw_field = false;
-        for (const std::uintptr_t candidate : kCandidates) {
-            std::string current;
-            std::uintptr_t object = 0;
-            if (read_ptr(instance + candidate, object) && is_user_ptr(object)) {
-                saw_field = true;
-                for (const std::uintptr_t inner :
-                     {0x10, 0x18, 0x0, 0x8, 0x20}) {
-                    std::string candidate_value;
-                    if (!read_msvc_string(object + inner, candidate_value)) {
-                        continue;
-                    }
-                    if (env_trace()) {
-                        zend::logf("env.binary_string: AeroMeshData +0x%X"
-                                   " inner=0x%X len=%zu",
-                                   static_cast<unsigned>(candidate),
-                                   static_cast<unsigned>(inner),
-                                   candidate_value.size());
-                    }
-                    if (candidate_value.size() > current.size()) {
-                        current = std::move(candidate_value);
-                    }
-                }
-            }
-            std::string direct;
-            if (read_msvc_string(instance + candidate, direct)) {
-                saw_field = true;
-                if (direct.size() > current.size()) {
-                    current = std::move(direct);
-                }
-            }
-            if (current.size() > value.size()) {
-                value = std::move(current);
-            }
-            if (!value.empty()) {
-                if (env_trace()) {
-                    zend::logf("env.binary_string: AeroMeshData +0x%X len=%zu",
-                               static_cast<unsigned>(candidate), value.size());
-                }
-                ok = true;
-                break;
-            }
-        }
-
-        // A union with no generated mesh exposes an empty SharedString; the
-        // field exists, so return the empty string instead of nil.
-        if (!ok && saw_field) {
+        const std::string class_name = instance_class_name(L, index);
+        const bool part_operation =
+            class_name == "PartOperation" || class_name == "UnionOperation" ||
+            class_name == "IntersectOperation" ||
+            class_name == "NegateOperation";
+        if (!part_operation) {
             value.clear();
             ok = true;
             if (env_trace()) {
-                zend::logf("env.binary_string: AeroMeshData empty");
+                zend::logf("env.binary_string: AeroMeshData %s empty",
+                           class_name.c_str());
+            }
+        } else {
+            constexpr std::uintptr_t kCandidates[] = {0x350, 0x388, 0x318, 0x378};
+            bool saw_field = false;
+            for (const std::uintptr_t candidate : kCandidates) {
+                std::string current;
+                std::uintptr_t object = 0;
+                if (read_ptr(instance + candidate, object) && is_user_ptr(object)) {
+                    saw_field = true;
+                    for (const std::uintptr_t inner :
+                         {0x10, 0x18, 0x0, 0x8, 0x20}) {
+                        std::string candidate_value;
+                        if (!read_msvc_string(object + inner, candidate_value)) {
+                            continue;
+                        }
+                        if (env_trace()) {
+                            zend::logf("env.binary_string: AeroMeshData +0x%X"
+                                       " inner=0x%X len=%zu",
+                                       static_cast<unsigned>(candidate),
+                                       static_cast<unsigned>(inner),
+                                       candidate_value.size());
+                        }
+                        if (candidate_value.size() > current.size()) {
+                            current = std::move(candidate_value);
+                        }
+                    }
+                }
+                std::string direct;
+                if (read_msvc_string(instance + candidate, direct)) {
+                    saw_field = true;
+                    if (direct.size() > current.size()) {
+                        current = std::move(direct);
+                    }
+                }
+                if (current.size() > value.size()) {
+                    value = std::move(current);
+                }
+                if (!value.empty()) {
+                    if (env_trace()) {
+                        zend::logf("env.binary_string: AeroMeshData +0x%X len=%zu",
+                                   static_cast<unsigned>(candidate), value.size());
+                    }
+                    ok = true;
+                    break;
+                }
+            }
+
+            // A union with no generated mesh exposes an empty SharedString; the
+            // field exists, so return the empty string instead of nil.
+            if (!ok && saw_field) {
+                value.clear();
+                ok = true;
+                if (env_trace()) {
+                    zend::logf("env.binary_string: AeroMeshData empty");
+                }
             }
         }
     }
@@ -4402,6 +4491,18 @@ int gethiddenproperty(lua_State* L) {
         type_id == kTypeSharedString && push_tags_property(L, 1)) {
         lua_pushboolean(L, hidden ? 1 : 0);
         return 2;
+    }
+
+    // Values written through sethiddenproperty for computed string properties
+    // are kept here because this build exposes no writable field for them.
+    if (instance && name &&
+        (type_id == kTypeSharedString || type_id == kTypeBinaryString)) {
+        std::string overridden;
+        if (get_hidden_string_override(L, 1, name, overridden)) {
+            lua_pushlstring(L, overridden.data(), overridden.size());
+            lua_pushboolean(L, hidden ? 1 : 0);
+            return 2;
+        }
     }
 
     // SharedString values that the engine can convert are returned by the
@@ -4536,7 +4637,14 @@ int sethiddenproperty(lua_State* L) {
 
     if (original_type == kTypeBinaryString ||
         original_type == kTypeSharedString) {
-        lua_pushnil(L);
+        std::size_t length = 0;
+        const char* data = lua_tolstring(L, 3, &length);
+        if (!data) {
+            lua_pushnil(L);
+            return 1;
+        }
+        set_hidden_string_override(L, 1, name, data, length);
+        lua_pushboolean(L, hidden ? 1 : 0);
         return 1;
     }
 

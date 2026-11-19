@@ -35,6 +35,7 @@ target_include_directories(zend_core PRIVATE
     vendor
     third_party/imgui
     third_party/imgui/backends
+    third_party/zstd/include
 )
 
 target_compile_definitions(zend_core PRIVATE
@@ -50,7 +51,17 @@ if(MSVC)
     target_link_options(zend_core PRIVATE /INCREMENTAL:NO)
 endif()
 
-target_link_libraries(zend_core PRIVATE zend_luau bcrypt advapi32 winhttp d3d11 dxgi d3dcompiler)
+target_link_libraries(zend_core PRIVATE zend_luau bcrypt advapi32 winhttp ws2_32 d3d11 dxgi d3dcompiler
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/zstd/lib/zstd_static.lib")
+
+# The decompile backend ships next to module.dll. The reference tree is local
+# only, so CI builds simply omit the helper and the stub fallback stays active.
+set(ZEND_TOVEK_EXE "${CMAKE_CURRENT_SOURCE_DIR}/../sample/Dependencies/Tovek/decompiler.exe")
+if(EXISTS "${ZEND_TOVEK_EXE}")
+    add_custom_command(TARGET zend_core POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${ZEND_TOVEK_EXE}" "$<TARGET_FILE_DIR:zend_core>/Decompiler.exe")
+endif()
 
 source_group("bootstrap" FILES src/bootstrap/dllmain.cpp)
 source_group("ipc" FILES src/ipc/pipe.cpp src/ipc/session.cpp)

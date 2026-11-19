@@ -639,6 +639,11 @@ void apply_capabilities(Proto* proto) {
     set_proto_capabilities(proto, &g_capabilities);
 }
 
+bool owns_proto(const Proto* proto) {
+    return proto && proto->userdata ==
+                        reinterpret_cast<std::uint64_t*>(&g_capabilities);
+}
+
 void set_output_sink(OutputFn sink, void* context) {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     g_output_sink = sink;

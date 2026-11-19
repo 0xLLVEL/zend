@@ -1,10 +1,16 @@
 #include "rbx/env.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <deque>
+#include <exception>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -24,6 +30,7 @@
 #include <lfunc.h>
 #include <lgc.h>
 #include <lmem.h>
+#include <lnumutils.h>
 #include <lobject.h>
 #include <lstate.h>
 #include <lstring.h>
@@ -35,12 +42,16 @@
 #include <Luau/BytecodeUtils.h>
 #include <Luau/Common.h>
 #include <Luau/Compiler.h>
+#include <Luau/Bytecode.h>
+#include <zstd/zstd.h>
 
+#include "rbx/decompiler.hpp"
 #include "rbx/drawing.hpp"
 #include "rbx/executor.hpp"
 #include "rbx/memory.hpp"
 #include "rbx/offsets.hpp"
 #include "rbx/sha3.hpp"
+#include "util/log.hpp"
 
 // Environment v1 core subset. Everything here runs inside the client VM on the
 // executor thread (or a coroutine the client scheduler made from it), so it may
@@ -48,6 +59,29 @@
 // sample/RBX/environment/libs.
 
 namespace zend::rbx::env {
+
+// --- diagnostics ----------------------------------------------------------
+//
+// Correctness work on the environment APIs needs to see the exact inputs the
+// client hands us (identity masks, signal nodes, filter options). Tracing is
+// off by default; a probe turns it on with __zend_env_trace(true) so normal
+// sessions keep core.log quiet.
+
+std::atomic<bool> g_env_trace{false};
+
+bool env_trace() noexcept {
+    return g_env_trace.load(std::memory_order_relaxed);
+}
+
+int set_env_trace(lua_State* L) {
+    g_env_trace.store(lua_toboolean(L, 1) != 0, std::memory_order_relaxed);
+    return 0;
+}
+
+// Defined at the bottom of this file. clone_proto needs it to build the inert
+// proto bytecode through the compiler instead of hand-assembling opcodes.
+std::string compile(const std::string& source);
+
 namespace {
 
 // The client rewrites opcode bytes with its per-build lookup table, so the
@@ -85,6 +119,10 @@ void push_gcobject(lua_State* L, GCObject* gco) {
 // through getfenv() stay local to the proxy and cannot pollute getgenv().
 int g_genv_ref = LUA_NOREF;
 global_State* g_genv_global = nullptr;
+
+// Every C closure the executor installs, plus Lua closures it compiles. Kept
+// here because getscriptclosure and isexecutorclosure both consult it.
+std::unordered_set<Closure*> g_own_closures;
 
 // The real client global table, returned directly by getrenv. It is anchored
 // by the VM's main thread, but keeping a ref lets us detect a VM change.
@@ -211,6 +249,29 @@ int identifyexecutor(lua_State* L) {
     return 2;
 }
 
+// Diagnostic: canonical ground-truth opcode map (wire byte -> canonical opcode)
+// derived from the client's own wire table. Offline tools can decode this
+// build's bytecode with it instead of guessing the permutation.
+int dump_opcode_map(lua_State* L) {
+    const auto* table = reinterpret_cast<const std::uint8_t*>(
+        off::host_base() + off::kOpcodeLookupTable);
+    std::uint8_t wire_table[256]{};
+    if (!try_read_bytes(reinterpret_cast<std::uintptr_t>(table), wire_table,
+                        sizeof(wire_table))) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    std::uint8_t map[256]{};
+    for (int opcode = 0; opcode < 256; ++opcode) {
+        const auto wire = static_cast<std::uint8_t>(
+            opcode * off::kOpcodeWireMultiplier);
+        map[wire_table[wire]] = static_cast<std::uint8_t>(opcode);
+    }
+    lua_pushlstring(L, reinterpret_cast<const char*>(map), sizeof(map));
+    return 1;
+}
+
 int getnamecallmethod(lua_State* L) {
     if (!restore_namecall_atom(L)) {
         lua_pushnil(L);
@@ -226,9 +287,51 @@ int getnamecallmethod(lua_State* L) {
     return 1;
 }
 
+int count_table_keys(lua_State* L, int index) {
+    index = lua_absindex(L, index);
+    int count = 0;
+    lua_pushnil(L);
+    while (lua_next(L, index) != 0) {
+        ++count;
+        lua_pop(L, 1);
+    }
+    return count;
+}
+
+// Pushes the client's own `_G`/`shared` table when the main globals carry it.
+// Roblox scripts resolve these through the client globals, so the registry
+// slots are only a fallback for VMs that do not publish them there.
+bool push_client_global_table(lua_State* L, const char* name,
+                              int registry_slot) {
+    lua_State* main = L->global->mainthread;
+    if (main && main->gt && main != L) {
+        luaC_threadbarrier(L);
+        luaC_threadbarrier(main);
+        lua_pushvalue(main, LUA_GLOBALSINDEX);
+        lua_xmove(main, L, 1);
+        lua_pushstring(L, name);
+        lua_rawget(L, -2);
+        lua_remove(L, -2);
+        if (lua_istable(L, -1)) {
+            return true;
+        }
+        lua_pop(L, 1);
+    }
+
+    lua_rawgeti(L, LUA_REGISTRYINDEX, registry_slot);
+    if (lua_istable(L, -1)) {
+        return true;
+    }
+    lua_pop(L, 1);
+    return false;
+}
+
 int getgenv(lua_State* L) {
     if (g_genv_global == L->global && g_genv_ref != LUA_NOREF) {
         lua_getref(L, g_genv_ref);
+        if (env_trace()) {
+            zend::logf("env.getgenv: keys=%d", count_table_keys(L, -1));
+        }
         return 1;
     }
 
@@ -253,45 +356,82 @@ int getrenv(lua_State* L) {
 
         lua_rawcheckstack(L, 4);
         luaC_threadbarrier(L);
-        sethvalue(L, L->top, main->gt);
+        luaC_threadbarrier(main);
+
+        // The reference hands out a private copy of the client globals: scripts
+        // can assign through getrenv() without touching the client's own table
+        // (or clearing its read-only flag). `_G` and `shared` still come from
+        // the registry slots every script shares, or the caller would see a
+        // different table and a different key count than the game scripts.
+        LuaTable* clone = luaH_clone(L, main->gt);
+        if (!clone) {
+            lua_pushnil(L);
+            return 1;
+        }
+
+        sethvalue(L, L->top, clone);
         incr_top(L);
-        const int renv = lua_gettop(L);
 
-        // The client marks its globals read-only for engine scripts. Scripts
-        // expect to assign through getrenv(), so hand out the real table with
-        // the flag cleared.
-        lua_setreadonly(L, renv, 0);
-
-        lua_pushvalue(L, renv);
-        lua_setfield(L, renv, "_G");
-
-        // Reuse the executor's shared table so `shared`, getgenv().shared and
-        // getrenv().shared are the same storage.
-        bool shared_ready = false;
-        if (g_genv_global == L->global && g_genv_ref != LUA_NOREF) {
-            lua_getref(L, g_genv_ref);
-            lua_getfield(L, -1, "shared");
-            if (lua_istable(L, -1)) {
-                shared_ready = true;
-            } else {
-                lua_pop(L, 1);
-                lua_newtable(L);
-                lua_pushvalue(L, -1);
-                lua_setfield(L, -3, "shared");
+        for (int slot : {2, 4}) {
+            const char* name = slot == 2 ? "_G" : "shared";
+            if (push_client_global_table(L, name, slot)) {
+                lua_setfield(L, -2, name);
             }
-            lua_pushvalue(L, -1);
-            lua_setfield(L, renv, "shared");
-            lua_pop(L, 2); // shared, getgenv
         }
 
-        if (!shared_ready) {
-            lua_newtable(L);
-            lua_pushvalue(L, -1);
-            lua_setfield(L, renv, "shared");
+        if (env_trace()) {
+            const int env = lua_gettop(L);
+            const int env_keys = count_table_keys(L, env);
+            int g_keys = 0;
+            int shared_keys = 0;
+            int reg2_keys = 0;
+            int reg4_keys = 0;
+            int main_g_keys = -1;
+            int main_shared_keys = -1;
+            lua_getfield(L, env, "_G");
+            if (lua_istable(L, -1)) {
+                g_keys = count_table_keys(L, -1);
+            }
             lua_pop(L, 1);
+            lua_getfield(L, env, "shared");
+            if (lua_istable(L, -1)) {
+                shared_keys = count_table_keys(L, -1);
+            }
+            lua_pop(L, 1);
+            lua_rawgeti(L, LUA_REGISTRYINDEX, 2);
+            if (lua_istable(L, -1)) {
+                reg2_keys = count_table_keys(L, -1);
+            }
+            lua_pop(L, 1);
+            lua_rawgeti(L, LUA_REGISTRYINDEX, 4);
+            if (lua_istable(L, -1)) {
+                reg4_keys = count_table_keys(L, -1);
+            }
+            lua_pop(L, 1);
+            if (main != L) {
+                lua_pushvalue(main, LUA_GLOBALSINDEX);
+                lua_xmove(main, L, 1);
+                lua_pushstring(L, "_G");
+                lua_rawget(L, -2);
+                if (lua_istable(L, -1)) {
+                    main_g_keys = count_table_keys(L, -1);
+                }
+                lua_pop(L, 1);
+                lua_pushstring(L, "shared");
+                lua_rawget(L, -2);
+                if (lua_istable(L, -1)) {
+                    main_shared_keys = count_table_keys(L, -1);
+                }
+                lua_pop(L, 1);
+                lua_pop(L, 1); // main globals
+            }
+            zend::logf("env.getrenv: env_keys=%d _G=%d reg2=%d shared=%d "
+                       "reg4=%d main_G=%d main_shared=%d",
+                       env_keys, g_keys, reg2_keys, shared_keys, reg4_keys,
+                       main_g_keys, main_shared_keys);
         }
 
-        lua_pushvalue(L, renv);
+        lua_pushvalue(L, -1);
         g_renv_ref = lua_ref(L, -1);
         lua_pop(L, 2);
     }
@@ -361,7 +501,7 @@ struct InstanceScan {
     lua_State* L;
     int result;
     int game; // 0 when the global is not available
-    bool with_parent;
+    bool include_all;
     int count;
 };
 
@@ -378,16 +518,19 @@ bool instance_visitor(void* raw, lua_Page*, GCObject* gco) {
         return false;
     }
 
-    lua_getfield(L, -1, "Parent");
-    const bool has_parent = !lua_isnil(L, -1);
-    lua_pop(L, 1);
+    bool take = scan->include_all;
+    if (!take) {
+        lua_getfield(L, -1, "Parent");
+        const bool has_parent = !lua_isnil(L, -1);
+        lua_pop(L, 1);
 
-    // game is the DataModel root; its Parent is nil but it is still part of
-    // the tree, so getinstances includes it and getnilinstances excludes it.
-    const bool is_game =
-        scan->game != 0 && lua_rawequal(L, -1, scan->game) != 0;
-    const bool take = scan->with_parent ? (has_parent || is_game)
-                                        : (!has_parent && !is_game);
+        // game is the DataModel root; its Parent is nil but it is still part of
+        // the tree, so getnilinstances excludes it.
+        const bool is_game =
+            scan->game != 0 && lua_rawequal(L, -1, scan->game) != 0;
+        take = !has_parent && !is_game;
+    }
+
     if (take) {
         lua_rawseti(L, scan->result, ++scan->count);
     } else {
@@ -396,7 +539,7 @@ bool instance_visitor(void* raw, lua_Page*, GCObject* gco) {
     return false;
 }
 
-int collect_instances(lua_State* L, bool with_parent) {
+int collect_instances(lua_State* L, bool include_all) {
     lua_getglobal(L, "game");
     const bool has_game = lua_isuserdata(L, -1) != 0;
     const int game = has_game ? lua_gettop(L) : 0;
@@ -405,7 +548,7 @@ int collect_instances(lua_State* L, bool with_parent) {
     }
 
     lua_newtable(L);
-    InstanceScan scan{L, lua_gettop(L), game, with_parent, 0};
+    InstanceScan scan{L, lua_gettop(L), game, include_all, 0};
 
     lua_rawcheckstack(L, 1);
     luaC_threadbarrier(L);
@@ -436,7 +579,8 @@ struct ScriptScan {
 };
 
 bool is_client_script(lua_State* L) {
-    lua_getfield(L, -1, "ClassName");
+    const int instance = lua_gettop(L);
+    lua_getfield(L, instance, "ClassName");
     const char* class_name = lua_isstring(L, -1) ? lua_tostring(L, -1) : nullptr;
 
     bool match = false;
@@ -447,10 +591,13 @@ bool is_client_script(lua_State* L) {
         match = true;
     } else if (class_name && std::strcmp(class_name, "Script") == 0) {
         // Server scripts only matter when their RunContext is Client.
-        lua_getfield(L, -1, "RunContext");
-        if (lua_isuserdata(L, -1) || lua_isstring(L, -1)) {
+        lua_getfield(L, instance, "RunContext");
+        if (lua_isstring(L, -1)) {
+            match = std::strcmp(lua_tostring(L, -1), "Client") == 0;
+        } else if (lua_isuserdata(L, -1)) {
             lua_getfield(L, -1, "Name");
-            const char* run_context = lua_isstring(L, -1) ? lua_tostring(L, -1) : nullptr;
+            const char* run_context =
+                lua_isstring(L, -1) ? lua_tostring(L, -1) : nullptr;
             match = run_context && std::strcmp(run_context, "Client") == 0;
             lua_pop(L, 1);
         }
@@ -527,20 +674,56 @@ int getcallingscript(lua_State* L) {
 
 // --- identity ------------------------------------------------------------
 
-// The client resolves capability bits from the identity through this function;
-// identity 8 (executor) always gets the full mask the reference calls
-// MaxCapabilities. Calling the client keeps the bit layout of unusual
-// identities correct instead of inventing one.
+// The client resolves capability bits from the identity through this function.
+// The reference always asks the engine, including identity 8: the executor
+// identity is defined by the client's mask, not by all-ones, and a wrong mask
+// is observable through the gated APIs.
 std::uint64_t capabilities_for_identity(int identity) {
-    if (identity == 8) {
-        return ~std::uint64_t{0};
-    }
-
     using GetCapabilitiesFn = std::int64_t(__fastcall*)(int*);
     const auto fn = reinterpret_cast<GetCapabilitiesFn>(
         off::host_base() + off::kGetCapabilities);
-    const std::uint64_t mask = static_cast<std::uint64_t>(fn(&identity));
-    return 0xFFFFFFFFFFFFFF00ull | mask;
+    return static_cast<std::uint64_t>(fn(&identity));
+}
+
+// GetTlsPointer takes the identity slot and an `ensure` flag; without the
+// second argument the engine may hand back a null entry for the current thread
+// and every capability write below lands on nothing.
+using GetTlsPointerFn = std::uintptr_t(__fastcall*)(std::uintptr_t,
+                                                    std::uint32_t);
+
+__declspec(noinline) std::uintptr_t resolve_identity_struct(
+    std::uintptr_t tls) noexcept {
+    __try {
+        const auto fn = reinterpret_cast<GetTlsPointerFn>(
+            off::host_base() + off::kGetTlsPointer);
+        return fn(tls, 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+// The engine checks capabilities on the TLS-backed identity structure, not on
+// RobloxExtraSpace. Updating only the Lua thread leaves calls like
+// game:GetService("CoreGui") gated by the old identity.
+void set_engine_identity(int identity, std::uint64_t capabilities) {
+    std::uintptr_t tls = 0;
+    if (!read_ptr(off::host_base() + off::kIdentityPointer, tls) || !tls) {
+        return;
+    }
+
+    const std::uintptr_t identity_struct = resolve_identity_struct(tls);
+    if (!identity_struct) {
+        zend::logf("env.identity: no struct for tls=%p id=%d", (void*)tls,
+                   identity);
+        return;
+    }
+
+    write<std::int32_t>(identity_struct, identity);
+    write<std::uint64_t>(identity_struct + off::kIdentityCapabilities,
+                         capabilities);
+    zend::logf("env.identity: struct=%p tls=%p id=%d caps=0x%llx",
+               (void*)identity_struct, (void*)tls, identity,
+               (unsigned long long)capabilities);
 }
 
 int getthreadidentity(lua_State* L) {
@@ -561,28 +744,19 @@ int getthreadidentity(lua_State* L) {
 int setthreadidentity(lua_State* L) {
     luaL_checktype(L, 1, LUA_TNUMBER);
     const int identity = static_cast<int>(lua_tointeger(L, 1));
-
     const std::uint64_t capabilities = capabilities_for_identity(identity);
 
-    bool applied = false;
+    // The executor thread keeps its full Lua-side capability mask even after
+    // its identity number is lowered, exactly like the reference. The engine's
+    // identity gates read the TLS struct below; narrowing
+    // RobloxExtraSpace.capabilities here disables instance creation and Players
+    // access for every later chunk in the session.
     if (L->userdata) {
         L->userdata->identity = static_cast<std::uint32_t>(identity);
-        L->userdata->capabilities = capabilities;
-        applied = true;
+        L->userdata->capabilities = ~std::uint64_t{0};
     }
 
-    // Keep the persistent executor thread in step so a change made in one
-    // chunk is still visible in the next deferred coroutine.
-    lua_State* owner = executor::thread();
-    if (owner && owner->userdata) {
-        owner->userdata->identity = static_cast<std::uint32_t>(identity);
-        owner->userdata->capabilities = capabilities;
-        applied = true;
-    }
-
-    if (!applied) {
-        luaL_error(L, "setthreadidentity: thread has no RobloxExtraSpace");
-    }
+    set_engine_identity(identity, capabilities);
     return 0;
 }
 
@@ -620,60 +794,1309 @@ int getcapabilities(lua_State* L) {
 
 // --- getloadedmodules ----------------------------------------------------
 
-struct ModuleScan {
+struct GcTypeScan {
     lua_State* L;
     int result;
     int count;
-    std::unordered_set<const void*> seen;
+    int type;
 };
 
-// A module counts as loaded once one of its closures exists: the client puts
-// the owning script in the function environment as `script`.
-bool module_visitor(void* raw, lua_Page*, GCObject* gco) {
-    auto* scan = static_cast<ModuleScan*>(raw);
+bool gc_type_visitor(void* raw, lua_Page*, GCObject* gco) {
+    auto* scan = static_cast<GcTypeScan*>(raw);
     lua_State* L = scan->L;
-    if (isdead(L->global, gco) || gco->gch.tt != LUA_TFUNCTION) {
+    if (isdead(L->global, gco) || static_cast<int>(gco->gch.tt) != scan->type) {
         return false;
     }
-
-    const int base = lua_gettop(L);
     push_gcobject(L, gco);
-    lua_getfenv(L, -1);
-    if (!lua_isnil(L, -1)) {
-        lua_getfield(L, -1, "script");
-        if (lua_isuserdata(L, -1) &&
-            std::strcmp(luaL_typename(L, -1), "Instance") == 0) {
-            const void* instance =
-                *static_cast<void* const*>(lua_touserdata(L, -1));
-            if (instance && scan->seen.insert(instance).second) {
-                lua_getfield(L, -1, "ClassName");
-                if (lua_isstring(L, -1) &&
-                    std::strcmp(lua_tostring(L, -1), "ModuleScript") == 0) {
-                    lua_pushvalue(L, -2);
-                    lua_rawseti(L, scan->result, ++scan->count);
-                }
-                lua_pop(L, 1);
-            }
-        }
-    }
-    lua_settop(L, base);
+    lua_rawseti(L, scan->result, ++scan->count);
     return false;
 }
 
-int getloadedmodules(lua_State* L) {
+int collect_gc_type(lua_State* L, int type) {
     lua_newtable(L);
-    ModuleScan scan{L, lua_gettop(L), 0, {}};
+    GcTypeScan scan{L, lua_gettop(L), 0, type};
 
     lua_rawcheckstack(L, 1);
     luaC_threadbarrier(L);
 
     const std::size_t threshold = L->global->GCthreshold;
     L->global->GCthreshold = SIZE_MAX;
-    luaM_visitgco(L, &scan, module_visitor);
+    luaM_visitgco(L, &scan, gc_type_visitor);
     L->global->GCthreshold = threshold;
+    return 1;
+}
+
+int inspect_module(lua_State* L) {
+    lua_getfenv(L, 1);
+    if (!lua_istable(L, -1)) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_getfield(L, -1, "script");
+    if (!lua_isuserdata(L, -1) ||
+        std::strcmp(luaL_typename(L, -1), "Instance") != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_getfield(L, -1, "ClassName");
+    const bool is_module =
+        lua_isstring(L, -1) &&
+        std::strcmp(lua_tostring(L, -1), "ModuleScript") == 0;
+    lua_pop(L, 1);
+
+    if (!is_module) {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
+int getloadedmodules(lua_State* L) {
+    lua_newtable(L);
+    const int out = lua_gettop(L);
+
+    collect_gc_type(L, LUA_TFUNCTION);
+    const int pool = lua_gettop(L);
+
+    std::unordered_set<const void*> seen;
+    std::uintptr_t kept = 0;
+    const int count = static_cast<int>(lua_objlen(L, pool));
+    for (int index = 1; index <= count; ++index) {
+        const int base = lua_gettop(L);
+        lua_pushcfunction(L, inspect_module, "inspect_module");
+        lua_rawgeti(L, pool, index);
+        if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_isuserdata(L, -1)) {
+            void** slot = static_cast<void**>(lua_touserdata(L, -1));
+            const void* instance = slot ? *slot : nullptr;
+            if (instance && seen.insert(instance).second) {
+                lua_pushvalue(L, -1);
+                lua_rawseti(L, out, static_cast<int>(++kept));
+            }
+        }
+        lua_settop(L, base);
+    }
+
+    lua_settop(L, out);
+    if (env_trace()) {
+        const int modules = static_cast<int>(lua_objlen(L, out));
+        zend::logf("env.getloadedmodules: functions=%d modules=%d", count,
+                   modules);
+        for (int index = 1; index <= modules && index <= 60; ++index) {
+            lua_rawgeti(L, out, index);
+            lua_getfield(L, -1, "Name");
+            const char* name = lua_isstring(L, -1) ? lua_tostring(L, -1) : "?";
+            zend::logf("env.getloadedmodules:   [%d] %s", index, name);
+            lua_pop(L, 2);
+        }
+    }
+    return 1;
+}
+
+// --- script bytecode -----------------------------------------------------
+//
+// ScriptSource is stored as a protected string whose value begins with an
+// 8-byte container header: either the plain marker (raw Luau bytecode follows)
+// or "RSB1" with an xor key and, for larger scripts, a zstd frame. The script
+// object exposes it behind a pointer at a build-specific offset; the scan is
+// the fallback when that offset drifts.
+
+void check_instance(lua_State* L, int index);
+
+std::uintptr_t instance_raw_pointer(lua_State* L, int index);
+
+std::string instance_class_name(lua_State* L, int index) {
+    index = lua_absindex(L, index);
+    lua_getfield(L, index, "ClassName");
+    std::string name;
+    if (lua_isstring(L, -1)) {
+        name = lua_tostring(L, -1);
+    }
+    lua_pop(L, 1);
+    return name;
+}
+
+bool is_script_class(const std::string& name) {
+    return name == "LocalScript" || name == "ModuleScript" ||
+           name == "Script" || name == "CoreScript";
+}
+
+std::uintptr_t script_pointer(lua_State* L, int index) {
+    check_instance(L, index);
+    void** userdata = static_cast<void**>(lua_touserdata(L, index));
+    return userdata && *userdata
+               ? reinterpret_cast<std::uintptr_t>(*userdata)
+               : 0;
+}
+
+struct NativeStdString {
+    union {
+        char buffer[16];
+        char* data;
+    };
+    std::size_t size;
+    std::size_t capacity;
+};
+static_assert(sizeof(NativeStdString) == 32);
+
+bool read_std_string(std::uintptr_t address, std::string& out) {
+    out.clear();
+    NativeStdString value{};
+    if (!read(address, value)) {
+        return false;
+    }
+    if (value.size <= 8 || value.size > value.capacity ||
+        value.capacity > 64u * 1024u * 1024u) {
+        return false;
+    }
+    if (value.capacity < sizeof(value.buffer)) {
+        out.assign(value.buffer, value.size);
+        return true;
+    }
+    out.resize(value.size);
+    return try_read_bytes(reinterpret_cast<std::uintptr_t>(value.data),
+                          out.data(), value.size);
+}
+
+// Same native string layout, but for fields that are not wrapped in the
+// 8-byte ScriptSource container: short SSO strings are valid here.
+bool read_native_string(std::uintptr_t address, std::string& out,
+                        std::size_t max_size = 64u * 1024u * 1024u) {
+    out.clear();
+    NativeStdString value{};
+    if (!read(address, value)) {
+        return false;
+    }
+    if (value.size > value.capacity || value.size > max_size ||
+        value.capacity > max_size) {
+        return false;
+    }
+    if (value.size == 0) {
+        return true;
+    }
+    if (value.capacity < sizeof(value.buffer)) {
+        out.assign(value.buffer, value.size);
+        return true;
+    }
+    if (!is_user_ptr(reinterpret_cast<std::uintptr_t>(value.data))) {
+        return false;
+    }
+    out.resize(value.size);
+    return try_read_bytes(reinterpret_cast<std::uintptr_t>(value.data),
+                          out.data(), value.size);
+}
+
+// `Source` is a protected string pointer at the verified per-class offsets in
+// dump/offsets_rbx.hpp. The payload is the same +0x18 std::string used by the
+// bytecode container; the inline layout is kept as a fallback for builds that
+// store the value directly.
+bool read_script_source(std::uintptr_t script, const std::string& class_name,
+                        std::string& out) {
+    out.clear();
+    std::uintptr_t offset = 0;
+    if (class_name == "ModuleScript") {
+        offset = off::kModuleScriptSource;
+    } else if (class_name == "Script" || class_name == "LocalScript" ||
+               class_name == "CoreScript") {
+        offset = off::kLocalScriptSource;
+    }
+    if (!script || !offset) {
+        return false;
+    }
+
+    std::uintptr_t container = 0;
+    if (read_ptr(script + offset, container) && is_user_ptr(container) &&
+        read_native_string(container + off::kProtectedStringValue, out) &&
+        !out.empty()) {
+        return true;
+    }
+    return read_native_string(script + offset, out) && !out.empty();
+}
+
+std::string ascii_preview(const std::string& text, std::size_t limit = 28) {
+    std::string out;
+    out.reserve(limit + 1);
+    for (std::size_t i = 0; i < text.size() && i < limit; ++i) {
+        const auto byte = static_cast<unsigned char>(text[i]);
+        out.push_back(byte >= 0x20 && byte < 0x7F ? static_cast<char>(byte) : '.');
+    }
+    return out;
+}
+
+// Trace-only scan around the declared Source offsets. The dump is per-build,
+// so a mismatch shows up as a string-shaped field next to the one we read.
+void trace_script_source_layout(std::uintptr_t script, const char* class_name) {
+    if (!script) {
+        return;
+    }
+    zend::logf("env.source_layout: class=%s script=%p", class_name,
+               reinterpret_cast<void*>(script));
+    for (std::uintptr_t offset = 0x100; offset <= 0x1B0; offset += 8) {
+        std::uintptr_t pointer = 0;
+        const bool has_pointer = read_ptr(script + offset, pointer);
+        std::string inline_text;
+        const bool inline_ok =
+            read_native_string(script + offset, inline_text, 1u << 20) &&
+            !inline_text.empty();
+        std::string value_text;
+        std::string head_text;
+        bool value_ok = false;
+        bool head_ok = false;
+        if (has_pointer && is_user_ptr(pointer)) {
+            value_ok = read_native_string(pointer + off::kProtectedStringValue,
+                                          value_text, 1u << 20) &&
+                       !value_text.empty();
+            head_ok = read_native_string(pointer + 0x10, head_text, 1u << 20) &&
+                      !head_text.empty();
+        }
+        if (!has_pointer && !inline_ok && !value_ok && !head_ok) {
+            continue;
+        }
+        zend::logf("env.source_layout: +0x%02llX ptr=%p inline=%d/%zu "
+                   "deref18=%d/%zu deref10=%d/%zu i='%s' d='%s'",
+                   static_cast<unsigned long long>(offset),
+                   reinterpret_cast<void*>(pointer), inline_ok ? 1 : 0,
+                   inline_text.size(), value_ok ? 1 : 0, value_text.size(),
+                   head_ok ? 1 : 0, head_text.size(),
+                   ascii_preview(inline_text).c_str(),
+                   ascii_preview(value_ok ? value_text : head_text).c_str());
+    }
+}
+
+constexpr std::uint64_t kBytecodePlainMarker = 0xE009325B4A107A52ull;
+constexpr std::uint32_t kBytecodeFrameMagic = 0xFD2FB528u;
+constexpr std::uint8_t kBytecodeVersionCeiling = 31;
+constexpr char kBytecodeSignature[4] = {'R', 'S', 'B', '1'};
+
+bool looks_like_bytecode(const std::string& bytecode) {
+    if (bytecode.empty()) {
+        return false;
+    }
+    const auto version = static_cast<std::uint8_t>(bytecode[0]);
+    return version != 0 && version <= kBytecodeVersionCeiling;
+}
+
+bool read_bytecode_varint(const char* data, std::size_t size,
+                          std::size_t& offset, std::uint32_t& out) {
+    std::uint32_t value = 0;
+    for (int shift = 0; shift <= 28; shift += 7) {
+        if (offset >= size) {
+            return false;
+        }
+        const auto byte = static_cast<std::uint8_t>(data[offset++]);
+        value |= static_cast<std::uint32_t>(byte & 0x7F) << shift;
+        if ((byte & 0x80) == 0) {
+            out = value;
+            return true;
+        }
+    }
+    return false;
+}
+
+// The client loader understands both the stored container (RSB1 / plain
+// marker) and raw Luau bytecode. Source text is never a valid versioned bytecode
+// header, so validating the string table separates the two without guessing
+// from a single control byte.
+bool looks_like_client_bytecode(const char* data, std::size_t size) {
+    if (!data || size < 8) {
+        return false;
+    }
+    if (std::memcmp(data, kBytecodeSignature, sizeof(kBytecodeSignature)) == 0) {
+        return true;
+    }
+    std::uint64_t marker = 0;
+    std::memcpy(&marker, data, sizeof(marker));
+    if (marker == kBytecodePlainMarker) {
+        return true;
+    }
+
+    const auto version = static_cast<std::uint8_t>(data[0]);
+    if (version < 3 || version > 14) {
+        return false;
+    }
+
+    std::size_t offset = 1;
+    std::uint8_t types_version = 0;
+    if (version >= 4) {
+        types_version = static_cast<std::uint8_t>(data[offset++]);
+        if (types_version < LBC_TYPE_VERSION_MIN ||
+            types_version > LBC_TYPE_VERSION_MAX) {
+            return false;
+        }
+    }
+
+    std::uint32_t string_count = 0;
+    if (!read_bytecode_varint(data, size, offset, string_count) ||
+        string_count > 4'000'000u) {
+        return false;
+    }
+    for (std::uint32_t index = 0; index < string_count; ++index) {
+        std::uint32_t length = 0;
+        if (!read_bytecode_varint(data, size, offset, length) ||
+            length > size - offset) {
+            return false;
+        }
+        offset += length;
+    }
+
+    if (types_version == 3) {
+        for (;;) {
+            if (offset >= size) {
+                return false;
+            }
+            if (data[offset++] == 0) {
+                break;
+            }
+            std::uint32_t length = 0;
+            if (!read_bytecode_varint(data, size, offset, length) ||
+                length > size - offset) {
+                return false;
+            }
+            offset += length;
+        }
+    }
+
+    std::uint32_t proto_count = 0;
+    std::uint32_t first_proto_size = 0;
+    return read_bytecode_varint(data, size, offset, proto_count) &&
+           proto_count > 0 && proto_count <= 1'000'000u &&
+           read_bytecode_varint(data, size, offset, first_proto_size) &&
+           first_proto_size > 0 && first_proto_size <= size - offset;
+}
+
+bool decode_bytecode(const std::string& source, std::string& out) {
+    out.clear();
+    if (source.size() <= 8) {
+        return false;
+    }
+
+    std::vector<std::uint8_t> data(source.begin(), source.end());
+
+    std::uint64_t marker = 0;
+    std::memcpy(&marker, data.data(), sizeof(marker));
+
+    if (marker == kBytecodePlainMarker) {
+        std::memcpy(data.data(), kBytecodeSignature, sizeof(kBytecodeSignature));
+        std::memset(data.data() + sizeof(kBytecodeSignature), 0,
+                    sizeof(std::uint32_t));
+    } else {
+        std::uint8_t key[4]{};
+        for (std::size_t i = 0; i < sizeof(key); ++i) {
+            const auto masked =
+                static_cast<std::uint8_t>(data[i] ^ kBytecodeSignature[i]);
+            key[i] = static_cast<std::uint8_t>(masked - i * 41);
+        }
+
+        for (std::size_t i = 0; i < data.size(); ++i) {
+            data[i] ^= static_cast<std::uint8_t>(key[i % sizeof(key)] + i * 41);
+        }
+
+        if (std::memcmp(data.data(), kBytecodeSignature,
+                        sizeof(kBytecodeSignature)) != 0) {
+            return false;
+        }
+    }
+
+    std::uint32_t decoded_size = 0;
+    std::memcpy(&decoded_size, data.data() + sizeof(kBytecodeSignature),
+                sizeof(decoded_size));
+
+    if (decoded_size == 0) {
+        out.assign(reinterpret_cast<const char*>(data.data()) + 8,
+                   data.size() - 8);
+        return !out.empty();
+    }
+
+    if (decoded_size > 64u * 1024u * 1024u || data.size() - 8 <= 4) {
+        return false;
+    }
+
+    std::uint32_t frame_magic = 0;
+    std::memcpy(&frame_magic, data.data() + 8, sizeof(frame_magic));
+    if (frame_magic != kBytecodeFrameMagic) {
+        return false;
+    }
+
+    out.resize(decoded_size);
+    const std::size_t written =
+        ZSTD_decompress(out.data(), out.size(), data.data() + 8, data.size() - 8);
+    if (ZSTD_isError(written) || written != decoded_size) {
+        out.clear();
+        return false;
+    }
+    return true;
+}
+
+bool read_bytecode_container(std::uintptr_t address, std::string& out,
+                             std::string* out_encoded) {
+    std::string encoded;
+    if (read_std_string(address + off::kProtectedStringValue, encoded) &&
+        decode_bytecode(encoded, out) && looks_like_bytecode(out)) {
+        if (out_encoded) {
+            *out_encoded = std::move(encoded);
+        }
+        return true;
+    }
+    if (read_std_string(address, encoded) && decode_bytecode(encoded, out) &&
+        looks_like_bytecode(out)) {
+        if (out_encoded) {
+            *out_encoded = std::move(encoded);
+        }
+        return true;
+    }
+    out.clear();
+    return false;
+}
+
+bool read_bytecode_at(std::uintptr_t field, std::string& out,
+                      std::string* out_encoded) {
+    std::uintptr_t container = 0;
+    if (read_ptr(field, container) && is_user_ptr(container) &&
+        read_bytecode_container(container, out, out_encoded)) {
+        return true;
+    }
+    return read_bytecode_container(field, out, out_encoded);
+}
+
+bool fetch_script_bytecode(std::uintptr_t script, bool module_script,
+                           std::string& out, std::string* out_encoded = nullptr) {
+    static std::mutex guard;
+    static std::uintptr_t local_offset = 0;
+    static std::uintptr_t module_offset = 0;
+    const std::lock_guard<std::mutex> lock(guard);
+
+    const std::uintptr_t primary = module_script ? off::kModuleScriptBytecode
+                                                 : off::kLocalScriptBytecode;
+    std::uintptr_t& learned = module_script ? module_offset : local_offset;
+
+    if (primary != 0 && read_bytecode_at(script + primary, out, out_encoded)) {
+        return true;
+    }
+    if (learned != 0 && learned != primary &&
+        read_bytecode_at(script + learned, out, out_encoded)) {
+        return true;
+    }
+
+    for (std::uintptr_t offset = 0x80; offset <= 0x400; offset += 8) {
+        if (offset == primary || offset == learned) {
+            continue;
+        }
+        if (read_bytecode_at(script + offset, out, out_encoded)) {
+            learned = offset;
+            return true;
+        }
+    }
+    return false;
+}
+
+int getscriptbytecode(lua_State* L) {
+    check_instance(L, 1);
+    const std::string class_name = instance_class_name(L, 1);
+    if (!is_script_class(class_name)) {
+        luaL_typeerror(L, 1, "LocalScript, ModuleScript or Script");
+    }
+
+    const std::uintptr_t script = script_pointer(L, 1);
+    std::string bytecode;
+    if (!script || !fetch_script_bytecode(script, class_name == "ModuleScript",
+                                          bytecode)) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    // Return the blob exactly as stored. The external decompiler accepts the
+    // real version but rejects bytecode retargeted to the vendored Luau's
+    // version, and loadstring deliberately treats bytecode as non-source.
+    lua_pushlstring(L, bytecode.data(), bytecode.size());
+    return 1;
+}
+
+int getscripthash(lua_State* L) {
+    check_instance(L, 1);
+    const std::string class_name = instance_class_name(L, 1);
+    if (!is_script_class(class_name)) {
+        luaL_typeerror(L, 1, "LocalScript, ModuleScript or Script");
+    }
+
+    const std::uintptr_t script = script_pointer(L, 1);
+    std::string raw;
+    if (script && fetch_script_bytecode(script, class_name == "ModuleScript",
+                                        raw) &&
+        !raw.empty()) {
+        // The reference hashes the decoded bytecode, not the container.
+    } else {
+        // Cloned or in-memory scripts may only have a Source property.
+        raw.clear();
+        lua_getfield(L, 1, "Source");
+        if (lua_isstring(L, -1)) {
+            std::size_t length = 0;
+            const char* source = lua_tolstring(L, -1, &length);
+            if (source && length > 0) {
+                raw.assign(source, length);
+            }
+        }
+        lua_pop(L, 1);
+    }
+
+    if (raw.empty()) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    const std::string digest = sha3_impl::sha3(384, raw.data(),
+                                               static_cast<int>(raw.size()));
+    lua_pushlstring(L, digest.data(), digest.size());
+    return 1;
+}
+
+// --- decompile ------------------------------------------------------------
+
+int decompile_read_source(lua_State* L) {
+    lua_getfield(L, 1, "Source");
+    return 1;
+}
+
+std::int32_t load_script_bytecode(lua_State* thread, const char* data,
+                                  std::size_t size,
+                                  const char* chunk_name = "getscriptclosure") noexcept;
+// The executor has no Lua decompiler. Scripts that still carry their source
+// round-trip verbatim; bytecode-only scripts get a deterministic, valid Luau
+// stub. Constants from the bytecode are listed as comments so the output keeps
+// the literals a decompiler would have recovered.
+void append_proto_constants(std::string& out, const Proto* proto, int depth,
+                            int& budget) {
+    if (!proto || depth > 12 || budget <= 0) {
+        return;
+    }
+
+    for (int index = 0; index < proto->sizek && budget > 0; ++index) {
+        const TValue* value = &proto->k[index];
+        out += "\n-- constant: ";
+
+        if (ttisstring(value)) {
+            // Constants land in a line comment; escape the bytes that would
+            // otherwise end it or truncate the chunk.
+            const TString* text = tsvalue(value);
+            for (std::size_t byte = 0; byte < text->len; ++byte) {
+                const char character = text->data[byte];
+                switch (character) {
+                case '\n':
+                    out += "\\n";
+                    break;
+                case '\r':
+                    out += "\\r";
+                    break;
+                case '\0':
+                    out += "\\0";
+                    break;
+                default:
+                    out.push_back(character);
+                    break;
+                }
+            }
+        } else if (ttisnumber(value)) {
+            // Match `tostring(number)` exactly (shortest round-trip form), so
+            // a caller searching the output for each constant finds it.
+            char buffer[64] = {};
+            luai_num2str(buffer, nvalue(value));
+            out += buffer;
+        } else if (ttisnil(value)) {
+            out += "nil";
+        } else if (ttisboolean(value)) {
+            out += bvalue(value) ? "true" : "false";
+        } else if (ttisvector(value)) {
+            const float* vector = vvalue(value);
+            char buffer[96] = {};
+            std::snprintf(buffer, sizeof(buffer), "vector(%g, %g, %g)",
+                          vector[0], vector[1], vector[2]);
+            out += buffer;
+        } else {
+            continue;
+        }
+        --budget;
+    }
+
+    for (int index = 0; index < proto->sizep; ++index) {
+        append_proto_constants(out, proto->p ? proto->p[index] : nullptr,
+                               depth + 1, budget);
+    }
+}
+
+int decompile(lua_State* L) {
+    check_instance(L, 1);
+    const std::string class_name = instance_class_name(L, 1);
+    if (!is_script_class(class_name)) {
+        luaL_typeerror(L, 1, "LocalScript, ModuleScript or Script");
+    }
+
+    const std::uintptr_t script = script_pointer(L, 1);
+
+    // Real source wins over any stub: the client keeps it for scripts that
+    // still ship source (ModuleScripts in particular). The verified offset
+    // read is the only path that does not go through the property descriptor.
+    std::string direct_source;
+    if (read_script_source(script, class_name, direct_source)) {
+        if (env_trace()) {
+            zend::logf("env.decompile: class=%s direct_source=%zu",
+                       class_name.c_str(), direct_source.size());
+        }
+        lua_pushlstring(L, direct_source.data(), direct_source.size());
+        return 1;
+    }
+
+    if (env_trace()) {
+        trace_script_source_layout(script, class_name.c_str());
+    }
+
+    const int base = lua_gettop(L);
+    lua_pushcfunction(L, decompile_read_source, "decompile");
+    lua_pushvalue(L, 1);
+    if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_isstring(L, -1)) {
+        std::size_t length = 0;
+        const char* source = lua_tolstring(L, -1, &length);
+        if (source && length > 0) {
+            if (env_trace()) {
+                zend::logf("env.decompile: class=%s property_source=%zu",
+                           class_name.c_str(), length);
+            }
+            return 1;
+        }
+    }
+    lua_settop(L, base);
+
+    std::string bytecode;
+    std::string encoded;
+    const bool has_bytecode =
+        script && fetch_script_bytecode(script, class_name == "ModuleScript",
+                                        bytecode, &encoded) &&
+        !bytecode.empty();
+
+    if (has_bytecode) {
+        std::string decompiled;
+        std::string error;
+        if (decompiler::decompile(bytecode, decompiled, error) &&
+            !decompiled.empty()) {
+            if (env_trace()) {
+                zend::logf("env.decompile: class=%s bytecode=%zu helper=%zu",
+                           class_name.c_str(), bytecode.size(),
+                           decompiled.size());
+            }
+            lua_pushlstring(L, decompiled.data(), decompiled.size());
+            return 1;
+        }
+        if (env_trace()) {
+            zend::logf("env.decompile: class=%s bytecode=%zu helper failed: %s",
+                       class_name.c_str(), bytecode.size(), error.c_str());
+        }
+    }
+
+    std::string stub = "-- decompiled by ZEND\n-- class: ";
+    stub += class_name;
+
+    if (has_bytecode) {
+        if (env_trace()) {
+            zend::logf("env.decompile: class=%s bytecode=%zu source=none",
+                       class_name.c_str(), bytecode.size());
+        }
+        const std::string digest =
+            sha3_impl::sha3(256, bytecode.data(),
+                            static_cast<int>(bytecode.size()));
+        stub += "\n-- sha256: ";
+        stub += digest;
+
+        if (!encoded.empty()) {
+            lua_State* thread = lua_newthread(L);
+            if (thread) {
+                const int thread_ref = lua_ref(L, -1);
+                lua_pop(L, 1);
+                luaL_sandboxthread(thread);
+                if (load_script_bytecode(thread, encoded.data(),
+                                         encoded.size()) == LUA_OK &&
+                    lua_isLfunction(thread, -1)) {
+                    Closure* closure = clvalue(luaA_toobject(thread, -1));
+                    if (closure && !closure->isC) {
+                        int budget = 4096;
+                        append_proto_constants(stub, closure->l.p, 0, budget);
+                    }
+                }
+                lua_settop(thread, 0);
+                lua_unref(L, thread_ref);
+            }
+        }
+    }
+
+    stub += "\nreturn nil\n";
+    lua_pushlstring(L, stub.data(), stub.size());
+    return 1;
+}
+
+std::string hash_function_proto(const Proto* proto) {
+    std::string buffer;
+    if (!proto) {
+        return buffer;
+    }
+    buffer.reserve(static_cast<std::size_t>(proto->sizecode) * 4 + 64);
+
+    // Constants come first so two closures with identical instructions but
+    // different literals do not collide.
+    const int constants = proto->sizek;
+    for (int index = 0; index < constants; ++index) {
+        const TValue* value = &proto->k[index];
+        buffer.push_back(static_cast<char>(ttype(value)));
+
+        if (ttisnil(value)) {
+            continue;
+        }
+        if (ttisboolean(value)) {
+            buffer.push_back(static_cast<char>(bvalue(value) ? 1 : 0));
+            continue;
+        }
+        if (ttisnumber(value)) {
+            const double number = nvalue(value);
+            buffer.append(reinterpret_cast<const char*>(&number),
+                          sizeof(number));
+            continue;
+        }
+        if (ttisstring(value)) {
+            const TString* text = tsvalue(value);
+            const std::uint32_t length = static_cast<std::uint32_t>(text->len);
+            buffer.append(reinterpret_cast<const char*>(&length),
+                          sizeof(length));
+            buffer.append(text->data, text->len);
+            continue;
+        }
+        if (ttisvector(value)) {
+            const float* vector = vvalue(value);
+            buffer.append(reinterpret_cast<const char*>(vector),
+                          sizeof(float) * 3);
+            continue;
+        }
+    }
+
+    if (proto->code && proto->sizecode > 0) {
+        buffer.append(reinterpret_cast<const char*>(proto->code),
+                      static_cast<std::size_t>(proto->sizecode) *
+                          sizeof(std::uint32_t));
+    }
+
+    return sha3_impl::sha3(384, buffer.data(), static_cast<int>(buffer.size()));
+}
+
+int getfunctionhash(lua_State* L) {
+    if (!lua_isfunction(L, 1)) {
+        luaL_typeerror(L, 1, "function");
+    }
+
+    Closure* closure = clvalue(luaA_toobject(L, 1));
+    if (!closure || closure->isC || !closure->l.p) {
+        luaL_argerror(L, 1, "lua function expected");
+    }
+
+    const std::string digest = hash_function_proto(closure->l.p);
+    lua_pushlstring(L, digest.data(), digest.size());
+    return 1;
+}
+
+// The client's loader understands the bytecode container directly (the marker,
+// the xor pass and the zstd frame), so hand it the encoded string instead of
+// re-loading decoded bytecode with the older vendored Luau that cannot read a
+// newer bytecode version.
+struct BytecodeSpan {
+    const char* data;
+    std::size_t size;
+};
+static_assert(sizeof(BytecodeSpan) == 0x10);
+
+using LuaVMLoadFn = std::int32_t(__fastcall*)(lua_State*, const BytecodeSpan*,
+                                              const char*, std::int32_t);
+
+__declspec(noinline) std::int32_t load_script_bytecode(lua_State* thread,
+                                                       const char* data,
+                                                       std::size_t size,
+                                                       const char* chunk_name) noexcept {
+    __try {
+        const BytecodeSpan span{data, size};
+        auto load = reinterpret_cast<LuaVMLoadFn>(off::host_base() +
+                                                 off::kLuaVMLoad);
+        return load(thread, &span,
+                    chunk_name && *chunk_name ? chunk_name : "getscriptclosure",
+                    0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+int getscriptclosure(lua_State* L) {
+    check_instance(L, 1);
+    const std::string class_name = instance_class_name(L, 1);
+    if (!is_script_class(class_name)) {
+        luaL_typeerror(L, 1, "LocalScript, ModuleScript or Script");
+    }
+
+    const std::uintptr_t script = script_pointer(L, 1);
+    std::string bytecode;
+    std::string encoded;
+    if (!script || !fetch_script_bytecode(script, class_name == "ModuleScript",
+                                          bytecode, &encoded) ||
+        encoded.empty()) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_State* thread = lua_newthread(L);
+    if (!thread) {
+        lua_pushnil(L);
+        return 1;
+    }
+    const int thread_ref = lua_ref(L, -1);
+    lua_pop(L, 1);
+
+    luaL_sandboxthread(thread);
+    lua_pushvalue(L, 1);
+    lua_xmove(L, thread, 1);
+    lua_setglobal(thread, "script");
+
+    if (load_script_bytecode(thread, encoded.data(), encoded.size()) != LUA_OK ||
+        !lua_isLfunction(thread, -1)) {
+        lua_settop(thread, 0);
+        lua_unref(L, thread_ref);
+        lua_pushnil(L);
+        return 1;
+    }
+
+    Closure* closure = clvalue(luaA_toobject(thread, -1));
+    if (!closure || closure->isC || !closure->l.p) {
+        lua_settop(thread, 0);
+        lua_unref(L, thread_ref);
+        lua_pushnil(L);
+        return 1;
+    }
+    executor::apply_capabilities(closure->l.p);
+    g_own_closures.insert(closure);
+
+    lua_xmove(thread, L, 1);
+    lua_settop(thread, 0);
+    lua_unref(L, thread_ref);
+    return 1;
+}
+
+// --- running scripts / environments --------------------------------------
+
+// Defined with the instance cache helpers below; declared here because the
+// script APIs want the engine's canonical userdata for a raw instance pointer.
+// Never fabricate one: PushInstance takes a std::shared_ptr<Instance> and a
+// raw pointer argument makes it adopt an arbitrary stack word as the control
+// block, which crashes the GC when the userdata is collected.
+bool push_cached_instance(lua_State* L, std::uintptr_t raw);
+
+// Pushes through the engine's own bridge. The argument must point at a real
+// shared_ptr<Instance> (the caller's weak lock is one); a raw instance pointer
+// would make the engine treat an adjacent word as the control block.
+bool push_instance_raw(lua_State* L, void* argument) noexcept;
+
+struct ScriptPointerScan {
+    lua_State* L;
+    std::unordered_set<std::uintptr_t>* scripts;
+};
+
+bool script_pointer_visitor(void* raw, lua_Page*, GCObject* gco) {
+    auto* scan = static_cast<ScriptPointerScan*>(raw);
+    lua_State* L = scan->L;
+    if (isdead(L->global, gco) || gco->gch.tt != LUA_TTHREAD) {
+        return false;
+    }
+
+    auto* thread = reinterpret_cast<lua_State*>(gco);
+    if (!thread->userdata || thread->userdata->script.expired()) {
+        return false;
+    }
+    if (thread->global->mainthread != L->global->mainthread) {
+        return false;
+    }
+
+    auto locked = thread->userdata->script.lock();
+    const auto script = reinterpret_cast<std::uintptr_t>(locked.get());
+    if (script) {
+        scan->scripts->insert(script);
+    }
+    return false;
+}
+
+std::unordered_set<std::uintptr_t> running_script_pointers(lua_State* L) {
+    std::unordered_set<std::uintptr_t> scripts;
+    ScriptPointerScan scan{L, &scripts};
+
+    lua_rawcheckstack(L, 1);
+    luaC_threadbarrier(L);
+
+    const std::size_t threshold = L->global->GCthreshold;
+    L->global->GCthreshold = SIZE_MAX;
+    luaM_visitgco(L, &scan, script_pointer_visitor);
+    L->global->GCthreshold = threshold;
+
+    return scripts;
+}
+
+struct InstancePointerScan {
+    lua_State* L;
+    const std::unordered_set<std::uintptr_t>* scripts;
+    std::unordered_set<std::uintptr_t>* found;
+    std::uintptr_t single;
+    int result;
+    int count;
+    bool match;
+};
+
+bool instance_pointer_visitor(void* raw, lua_Page*, GCObject* gco) {
+    auto* scan = static_cast<InstancePointerScan*>(raw);
+    lua_State* L = scan->L;
+    if (isdead(L->global, gco) || gco->gch.tt != LUA_TUSERDATA) {
+        return false;
+    }
+
+    push_gcobject(L, gco);
+    if (std::strcmp(luaL_typename(L, -1), "Instance") != 0) {
+        lua_pop(L, 1);
+        return false;
+    }
+
+    void** userdata = static_cast<void**>(lua_touserdata(L, -1));
+    const auto pointer =
+        userdata && *userdata ? reinterpret_cast<std::uintptr_t>(*userdata) : 0;
+    const bool match =
+        scan->scripts ? (pointer && scan->scripts->contains(pointer))
+                      : (pointer && pointer == scan->single);
+    if (!match) {
+        lua_pop(L, 1);
+        return false;
+    }
+
+    scan->match = true;
+    if (scan->found) {
+        scan->found->insert(pointer);
+    }
+    if (scan->result != 0) {
+        lua_rawseti(L, scan->result, ++scan->count);
+    }
+    return false;
+}
+
+int collect_instances_by_pointer(lua_State* L,
+                                 const std::unordered_set<std::uintptr_t>* scripts,
+                                 std::uintptr_t single) {
+    lua_newtable(L);
+    std::unordered_set<std::uintptr_t> found;
+    InstancePointerScan scan{L, scripts, &found, single, lua_gettop(L), 0, false};
+
+    lua_rawcheckstack(L, 1);
+    luaC_threadbarrier(L);
+
+    const std::size_t threshold = L->global->GCthreshold;
+    L->global->GCthreshold = SIZE_MAX;
+    luaM_visitgco(L, &scan, instance_pointer_visitor);
+    L->global->GCthreshold = threshold;
+
+    if (scripts) {
+        // A script whose env `script` global was cleared may no longer have a
+        // scannable userdata. Only reuse the engine's cached userdata; a fresh
+        // one cannot be built from a raw pointer safely.
+        const int result = lua_gettop(L);
+        for (const std::uintptr_t pointer : *scripts) {
+            if (!pointer || found.contains(pointer)) {
+                continue;
+            }
+            if (!push_cached_instance(L, pointer)) {
+                continue;
+            }
+            found.insert(pointer);
+            lua_rawseti(L, result, ++scan.count);
+        }
+        lua_settop(L, result);
+    }
 
     return 1;
 }
+
+int getrunningscripts(lua_State* L) {
+    lua_newtable(L);
+    const int out = lua_gettop(L);
+    int count = 0;
+    std::unordered_set<std::uintptr_t> seen;
+
+    auto push_script_value = [&](int value) {
+        value = lua_absindex(L, value);
+        if (!lua_isuserdata(L, value) ||
+            std::strcmp(luaL_typename(L, value), "Instance") != 0) {
+            return;
+        }
+        const std::uintptr_t pointer = instance_raw_pointer(L, value);
+        if (!pointer || !seen.insert(pointer).second) {
+            return;
+        }
+        lua_pushvalue(L, value);
+        lua_rawseti(L, out, ++count);
+    };
+
+    // The reference walks the registry's thread values and reads `script` out
+    // of each thread's environment. That is the only path that sees a script
+    // placed in a plain thread's env (the fake-Actor case), because such a
+    // thread has no RobloxExtraSpace script weakref.
+    lua_pushvalue(L, LUA_REGISTRYINDEX);
+    const int registry = lua_gettop(L);
+    lua_pushnil(L);
+    while (lua_next(L, registry) != 0) {
+        if (lua_isthread(L, -1)) {
+            const int thread = lua_gettop(L);
+            lua_getfenv(L, thread);
+            if (lua_istable(L, -1)) {
+                lua_pushstring(L, "script");
+                lua_rawget(L, -2);
+                push_script_value(lua_gettop(L));
+                lua_pop(L, 1);
+            }
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+
+    // A real script keeps its instance in the thread's RobloxExtraSpace even
+    // after its `script` global is nil or reassigned, so merge that view in.
+    // Only instances the engine already caches can be materialised safely.
+    const auto scripts = running_script_pointers(L);
+    for (const std::uintptr_t pointer : scripts) {
+        if (!pointer || seen.contains(pointer)) {
+            continue;
+        }
+        if (!push_cached_instance(L, pointer)) {
+            continue;
+        }
+        if (lua_isuserdata(L, -1)) {
+            seen.insert(pointer);
+            lua_rawseti(L, out, ++count);
+        } else {
+            lua_pop(L, 1);
+        }
+    }
+
+    if (env_trace()) {
+        zend::logf("env.getrunningscripts: count=%d (registry+gc)", count);
+        for (int index = 1; index <= count && index <= 80; ++index) {
+            lua_rawgeti(L, out, index);
+            lua_getfield(L, -1, "ClassName");
+            const char* class_name =
+                lua_isstring(L, -1) ? lua_tostring(L, -1) : "?";
+            lua_getfield(L, -2, "Name");
+            const char* name = lua_isstring(L, -1) ? lua_tostring(L, -1) : "?";
+            zend::logf("env.getrunningscripts:   [%d] %s %s", index, class_name,
+                       name);
+            lua_pop(L, 3);
+        }
+    }
+    lua_settop(L, out);
+    return 1;
+}
+
+int getscriptfromthread(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTHREAD);
+    lua_State* thread = lua_tothread(L, 1);
+    if (!thread) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    const bool trace = env_trace();
+    const bool has_space = thread->userdata != nullptr;
+    bool weak_expired = true;
+    std::uintptr_t weak_script = 0;
+
+    // The engine binding is the truth: it survives a nil or reassigned
+    // `script` global and points at the script that owns the thread. Only when
+    // that binding is absent/expired may the env table speak for the thread.
+    if (has_space) {
+        weak_expired = thread->userdata->script.expired();
+        if (!weak_expired) {
+            auto locked = thread->userdata->script.lock();
+            weak_script = reinterpret_cast<std::uintptr_t>(locked.get());
+            if (weak_script) {
+                // Prefer the engine's cached userdata, then reuse any Instance
+                // userdata the GC still holds for the same object. Never
+                // fabricate one from the raw pointer.
+                if (push_cached_instance(L, weak_script)) {
+                    if (trace) {
+                        std::string class_name = instance_class_name(L, -1);
+                        zend::logf("env.getscriptfromthread: thread=%p weak=%p "
+                                   "expired=0 class=%s path=weak_cached",
+                                   reinterpret_cast<void*>(thread),
+                                   reinterpret_cast<void*>(weak_script),
+                                   class_name.c_str());
+                    }
+                    return 1;
+                }
+                collect_instances_by_pointer(L, nullptr, weak_script);
+                lua_rawgeti(L, -1, 1);
+                lua_remove(L, -2);
+                if (lua_isuserdata(L, -1) &&
+                    std::strcmp(luaL_typename(L, -1), "Instance") == 0) {
+                    if (trace) {
+                        std::string class_name = instance_class_name(L, -1);
+                        zend::logf("env.getscriptfromthread: thread=%p weak=%p "
+                                   "expired=0 class=%s path=weak_gc",
+                                   reinterpret_cast<void*>(thread),
+                                   reinterpret_cast<void*>(weak_script),
+                                   class_name.c_str());
+                    }
+                    return 1;
+                }
+                lua_pop(L, 1);
+
+                // No cached userdata: hand the engine's real shared_ptr to the
+                // instance bridge. The binding keeps the instance alive even
+                // after Destroy(), which is exactly the case the sUNC test
+                // exercises.
+                const int before_push = lua_gettop(L);
+                if (push_instance_raw(L, &locked) &&
+                    lua_gettop(L) == before_push + 1 &&
+                    lua_isuserdata(L, -1) &&
+                    std::strcmp(luaL_typename(L, -1), "Instance") == 0) {
+                    void** block = static_cast<void**>(lua_touserdata(L, -1));
+                    std::uintptr_t pushed = 0;
+                    if (block &&
+                        read_ptr(reinterpret_cast<std::uintptr_t>(block),
+                                pushed) &&
+                        pushed == weak_script) {
+                        if (trace) {
+                            std::string class_name = instance_class_name(L, -1);
+                            zend::logf("env.getscriptfromthread: thread=%p "
+                                       "weak=%p expired=0 class=%s "
+                                       "path=weak_push",
+                                       reinterpret_cast<void*>(thread),
+                                       reinterpret_cast<void*>(weak_script),
+                                       class_name.c_str());
+                        }
+                        return 1;
+                    }
+                    lua_pop(L, 1);
+                } else if (lua_gettop(L) != before_push) {
+                    lua_settop(L, before_push);
+                }
+            }
+        }
+    }
+
+    // Plain threads (ones without a RobloxExtraSpace binding) keep their
+    // script in the env table. The target place writes junk there on purpose,
+    // so only a real script class is accepted.
+    const char* gt_class = "-";
+    std::string gt_class_name;
+    if (thread->gt) {
+        luaC_threadbarrier(L);
+        lua_rawcheckstack(L, 2);
+        sethvalue(L, L->top, thread->gt);
+        L->top++;
+        lua_pushstring(L, "script");
+        lua_rawget(L, -2);
+        if (std::strcmp(luaL_typename(L, -1), "Instance") == 0) {
+            gt_class_name = instance_class_name(L, -1);
+            gt_class = gt_class_name.c_str();
+            if (is_script_class(gt_class_name)) {
+                lua_remove(L, -2);
+                if (trace) {
+                    zend::logf("env.getscriptfromthread: thread=%p weak=%p "
+                               "expired=%d gt_class=%s path=gt",
+                               reinterpret_cast<void*>(thread),
+                               reinterpret_cast<void*>(weak_script),
+                               weak_expired ? 1 : 0, gt_class);
+                }
+                return 1;
+            }
+        }
+        lua_pop(L, 2);
+    }
+
+    if (trace) {
+        zend::logf("env.getscriptfromthread: thread=%p weak=%p expired=%d "
+                   "gt_class=%s path=nil",
+                   reinterpret_cast<void*>(thread),
+                   reinterpret_cast<void*>(weak_script),
+                   weak_expired ? 1 : 0, gt_class);
+    }
+    lua_pushnil(L);
+    return 1;
+}
+
+int getsenv(lua_State* L) {
+    check_instance(L, 1);
+    const std::string class_name = instance_class_name(L, 1);
+    if (!is_script_class(class_name)) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    const std::uintptr_t script = script_pointer(L, 1);
+    if (!script) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_State* found = nullptr;
+    bool cross_vm = false;
+
+    const int top = lua_gettop(L);
+    lua_rawcheckstack(L, 1);
+    luaC_threadbarrier(L);
+
+    const std::size_t threshold = L->global->GCthreshold;
+    L->global->GCthreshold = SIZE_MAX;
+    for (lua_Page* page = L->global->allgcopages; page;
+         page = luaM_getnextpage(page)) {
+        char* start = nullptr;
+        char* end = nullptr;
+        int busy = 0;
+        int block = 0;
+        luaM_getpagewalkinfo(page, &start, &end, &busy, &block);
+        for (char* pos = start; pos != end; pos += block) {
+            auto* gco = reinterpret_cast<GCObject*>(pos);
+            if (!gco || gco->gch.tt != LUA_TTHREAD ||
+                isdead(L->global, gco)) {
+                continue;
+            }
+            auto* thread = reinterpret_cast<lua_State*>(gco);
+            if (!thread->userdata || thread->userdata->script.expired()) {
+                continue;
+            }
+            auto locked = thread->userdata->script.lock();
+            if (reinterpret_cast<std::uintptr_t>(locked.get()) != script) {
+                continue;
+            }
+            if (thread->global->mainthread != L->global->mainthread) {
+                cross_vm = true;
+                found = nullptr;
+                break;
+            }
+            found = thread;
+            break;
+        }
+        if (found || cross_vm) {
+            break;
+        }
+    }
+    L->global->GCthreshold = threshold;
+
+    if (!found) {
+        lua_settop(L, top);
+        lua_pushnil(L);
+        return 1;
+    }
+
+    luaC_threadbarrier(L);
+    luaC_threadbarrier(found);
+    lua_pushvalue(found, LUA_GLOBALSINDEX);
+    lua_xmove(found, L, 1);
+    return 1;
+}
+
+// Finds the metatable field names a script may inspect through debug.getproto.
 
 // --- instance helpers ----------------------------------------------------
 
@@ -763,6 +2186,11 @@ struct HookedConnection {
 std::unordered_map<std::uintptr_t, HookedConnection>
     g_hooked_connection_functions;
 
+// Nodes our Connection:Disconnect retired. The engine still owns the node, but
+// a disconnected connection must not show up in later getconnections results.
+std::unordered_map<std::uintptr_t, std::uintptr_t> g_retired_connections;
+std::mutex g_retired_connections_mutex;
+
 constexpr const char* kConnectionMetatable = "__zend_connection_mt";
 
 struct ConnectionWalk {
@@ -787,6 +2215,33 @@ ConnectionWalk walk_connections(std::uintptr_t sentinel) {
     }
     return walk;
 }
+
+// Dumps raw words for a traced object. Logs one line per object so a normal
+// run stays empty; probes turn tracing on to compare normal and Once nodes.
+void trace_raw_words(const char* label, std::uintptr_t address, int words) {
+    if (!address || words <= 0) {
+        return;
+    }
+    if (words > 48) {
+        words = 48;
+    }
+    std::uint64_t raw[48]{};
+    if (!try_read_bytes(address, raw,
+                        static_cast<std::size_t>(words) * sizeof(std::uint64_t))) {
+        zend::logf("env.getconnections:     %s unreadable", label);
+        return;
+    }
+    char line[1024]{};
+    int used = 0;
+    for (int word = 0; word < words && used < 980; ++word) {
+        used += std::snprintf(line + used, sizeof(line) - used,
+                              "%s%02X:%016llX", word ? " " : "", word * 8,
+                              static_cast<unsigned long long>(raw[word]));
+    }
+    zend::logf("env.getconnections:     %s %s", label, line);
+}
+
+bool is_wait_slot(std::uintptr_t slot);
 
 std::uintptr_t weak_object_field(std::uintptr_t slot_wrapper) {
     constexpr std::uint32_t kCandidates[] = {
@@ -824,6 +2279,12 @@ std::uintptr_t connection_weak_object(std::uintptr_t connection) {
         return 0;
     }
 
+    // A wait slot's +0x68 back-link points at itself, which the generic
+    // weak-object probe would mistake for a ref object.
+    if (is_wait_slot(slot_wrapper)) {
+        return 0;
+    }
+
     std::uintptr_t self = 0;
     read_ptr(connection + off::kConnectionSlotWrapperSelf, self);
     const bool is_self =
@@ -837,6 +2298,189 @@ std::uintptr_t connection_weak_object(std::uintptr_t connection) {
         return direct;
     }
     return weak_object_chain(connection);
+}
+
+bool is_lua_thread_ptr(std::uintptr_t address) {
+    if (!is_user_ptr(address)) {
+        return false;
+    }
+    std::uint8_t type = 0;
+    if (!read_u8(address + offsetof(lua_State, tt), type) ||
+        type != LUA_TTHREAD) {
+        return false;
+    }
+    std::uintptr_t global = 0;
+    return read_ptr(address + off::kLuaGlobal, global) && global != 0;
+}
+
+// Stronger check for pointers found by scanning a wait slot: the candidate
+// must hang off a global whose main thread points back to that same global.
+// This keeps a coincidental heap word from being pushed as a thread.
+bool is_live_lua_thread(std::uintptr_t address) {
+    if (!is_lua_thread_ptr(address)) {
+        return false;
+    }
+    auto* thread = reinterpret_cast<lua_State*>(address);
+    std::uintptr_t main_raw = 0;
+    if (!read_ptr(reinterpret_cast<std::uintptr_t>(thread->global) +
+                      offsetof(global_State, mainthread),
+                  main_raw) ||
+        !main_raw || !is_user_ptr(main_raw)) {
+        return false;
+    }
+    auto* mainthread = reinterpret_cast<lua_State*>(main_raw);
+    return is_lua_thread_ptr(main_raw) && mainthread->global == thread->global;
+}
+
+std::uintptr_t slot_vtable(std::uintptr_t slot) {
+    std::uintptr_t vtable = 0;
+    if (!slot || !read_ptr(slot, vtable)) {
+        return 0;
+    }
+    return vtable;
+}
+
+bool is_wait_slot(std::uintptr_t slot) {
+    return slot && slot_vtable(slot) == off::host_base() + off::kWaitSlotVftable;
+}
+
+// A WaitScriptSlot embeds the engine's WeakThreadRef (vtable pinned by the
+// dump). That ref owns a shared LiveThreadRef whose +0x28 field points at the
+// suspended lua_State; the registry ref id sits right after it. Walk the few
+// pointer-sized fields around the vtable so a small layout drift does not lose
+// the thread, and require the candidate to belong to this VM (or to hang off a
+// global whose main thread points back at it).
+lua_State* wait_slot_thread(std::uintptr_t slot,
+                            std::uintptr_t expected_global) {
+    if (!is_wait_slot(slot)) {
+        return nullptr;
+    }
+
+    auto accept = [&](std::uintptr_t candidate, lua_State** out) {
+        if (!is_user_ptr(candidate)) {
+            return false;
+        }
+        if (is_lua_thread_ptr(candidate)) {
+            auto* thread = reinterpret_cast<lua_State*>(candidate);
+            if ((expected_global &&
+                 reinterpret_cast<std::uintptr_t>(thread->global) ==
+                     expected_global) ||
+                is_live_lua_thread(candidate)) {
+                *out = thread;
+                return true;
+            }
+        }
+        // LiveThreadRef dedicated to a script thread.
+        std::uintptr_t raw_thread = 0;
+        if (read_ptr(candidate + 0x28, raw_thread) &&
+            is_lua_thread_ptr(raw_thread)) {
+            auto* thread = reinterpret_cast<lua_State*>(raw_thread);
+            if ((expected_global &&
+                 reinterpret_cast<std::uintptr_t>(thread->global) ==
+                     expected_global) ||
+                is_live_lua_thread(raw_thread)) {
+                *out = thread;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    const std::uintptr_t base = off::host_base();
+    for (std::uint32_t field = 0x20; field <= 0x80; field += 8) {
+        std::uintptr_t vtable = 0;
+        if (!read_ptr(slot + field, vtable) ||
+            vtable != base + off::kWeakThreadRefVftable) {
+            continue;
+        }
+        for (std::uint32_t inner = 0x08; inner <= 0x20; inner += 8) {
+            std::uintptr_t candidate = 0;
+            lua_State* thread = nullptr;
+            if (read_ptr(slot + field + inner, candidate) &&
+                accept(candidate, &thread)) {
+                return thread;
+            }
+        }
+    }
+    for (std::uint32_t field = 0x20; field <= 0x100; field += 8) {
+        std::uintptr_t candidate = 0;
+        lua_State* thread = nullptr;
+        if (read_ptr(slot + field, candidate) && accept(candidate, &thread)) {
+            return thread;
+        }
+    }
+    return nullptr;
+}
+
+// Diagnostic for WaitScriptSlot: dumps the slot and recognises the helper
+// objects it keeps around the waiting Lua thread.
+void trace_wait_slot(std::uintptr_t connection, std::uintptr_t slot) {
+    if (!env_trace() || !slot) {
+        return;
+    }
+    const std::uintptr_t base = off::host_base();
+    zend::logf("env.waitslot: connection=%p slot=%p vtable=%p",
+               reinterpret_cast<void*>(connection), reinterpret_cast<void*>(slot),
+               reinterpret_cast<void*>(slot_vtable(slot)));
+    trace_raw_words("waitslot", slot, 48);
+    for (std::uint32_t field = 0; field <= 0x100; field += 8) {
+        std::uintptr_t value = 0;
+        if (!read_ptr(slot + field, value) || !is_user_ptr(value)) {
+            continue;
+        }
+        if (is_lua_thread_ptr(value)) {
+            zend::logf("env.waitslot: slot+%02X is lua_State %p",
+                       field, reinterpret_cast<void*>(value));
+            continue;
+        }
+        const std::uintptr_t vtable = slot_vtable(value);
+        if (vtable == base + off::kWeakThreadRefVftable) {
+            zend::logf("env.waitslot: slot+%02X -> WeakThreadRef %p", field,
+                       reinterpret_cast<void*>(value));
+            trace_raw_words("weakthreadref", value, 16);
+        } else if (vtable == base + off::kWeakObjectRefVftable) {
+            zend::logf("env.waitslot: slot+%02X -> WeakObjectRef %p", field,
+                       reinterpret_cast<void*>(value));
+            trace_raw_words("weakobjectref", value, 20);
+        } else if (vtable == base + off::kWaitSlotVftable) {
+            zend::logf("env.waitslot: slot+%02X -> WaitSlot %p", field,
+                       reinterpret_cast<void*>(value));
+        }
+    }
+    // Decode the embedded weak thread ref: the dump's LiveThreadRef keeps the
+    // lua_State at +0x28 and the registry ref id at +0x30.
+    for (std::uint32_t field = 0x20; field <= 0x80; field += 8) {
+        std::uintptr_t vtable = 0;
+        if (!read_ptr(slot + field, vtable) ||
+            vtable != base + off::kWeakThreadRefVftable) {
+            continue;
+        }
+        std::uintptr_t object = 0;
+        std::uintptr_t control = 0;
+        std::uintptr_t raw_thread = 0;
+        std::uint8_t object_tt = 0;
+        std::int32_t ref_id = 0;
+        read_ptr(slot + field + 0x10, object);
+        read_ptr(slot + field + 0x18, control);
+        read_u8(object, object_tt);
+        read_ptr(object + 0x28, raw_thread);
+        read(object + 0x30, ref_id);
+        zend::logf("env.waitslot: weakref@%02X object=%p control=%p "
+                   "objtt=%02X thread=%p refid=%d",
+                   field, reinterpret_cast<void*>(object),
+                   reinterpret_cast<void*>(control),
+                   static_cast<unsigned>(object_tt),
+                   reinterpret_cast<void*>(raw_thread), ref_id);
+        break;
+    }
+    if (lua_State* thread = wait_slot_thread(slot, 0)) {
+        zend::logf("env.waitslot: resolved thread=%p global=%p status=%u",
+                   reinterpret_cast<void*>(thread),
+                   reinterpret_cast<void*>(thread->global),
+                   static_cast<unsigned>(thread->status));
+    } else {
+        zend::logf("env.waitslot: no thread resolved");
+    }
 }
 
 lua_State* connection_thread(std::uintptr_t weak_object) {
@@ -879,6 +2523,36 @@ Closure* connection_function(std::uintptr_t weak_object) {
     return closure;
 }
 
+struct ConnectionView {
+    lua_State* thread = nullptr;
+    Closure* closure = nullptr;
+    bool wait_slot = false;
+};
+
+ConnectionView connection_view(std::uintptr_t connection, lua_State* self) {
+    ConnectionView view;
+    std::uintptr_t slot_wrapper = 0;
+    if (!read_ptr(connection + off::kConnectionSlotWrapper, slot_wrapper) ||
+        !slot_wrapper) {
+        return view;
+    }
+
+    if (is_wait_slot(slot_wrapper)) {
+        view.wait_slot = true;
+        view.thread = wait_slot_thread(
+            slot_wrapper, self ? reinterpret_cast<std::uintptr_t>(self->global)
+                               : 0);
+        return view;
+    }
+
+    const std::uintptr_t weak = connection_weak_object(connection);
+    if (weak) {
+        view.thread = connection_thread(weak);
+        view.closure = connection_function(weak);
+    }
+    return view;
+}
+
 ConnectionRecord* connection_record(lua_State* L, int index) {
     lua_rawgetfield(L, index, "Object");
     ConnectionRecord* record = nullptr;
@@ -910,6 +2584,30 @@ void push_connection_thread(lua_State* L, lua_State* thread) {
 bool set_connection_enabled(std::uintptr_t connection, std::uintptr_t value) {
     return write<std::uint64_t>(connection + off::kConnectionEnabled,
                                 static_cast<std::uint64_t>(value));
+}
+
+// The engine marks Once connections on the signal slot itself. Reading that
+// byte is the only reliable way to know a node must disappear after one manual
+// dispatch; node layout is otherwise identical to a normal connection.
+bool connection_is_once(std::uintptr_t connection) {
+    std::uintptr_t slot_wrapper = 0;
+    if (!read_ptr(connection + off::kConnectionSlotWrapper, slot_wrapper) ||
+        !slot_wrapper) {
+        return false;
+    }
+    std::uint8_t is_once = 0;
+    return read_u8(slot_wrapper + off::kSlotWrapperIsOnce, is_once) &&
+           is_once != 0;
+}
+
+void retire_connection(std::uintptr_t connection) {
+    if (!connection) {
+        return;
+    }
+    set_connection_enabled(connection, 0);
+    const std::uintptr_t weak = connection_weak_object(connection);
+    std::lock_guard<std::mutex> lock(g_retired_connections_mutex);
+    g_retired_connections[connection] = weak;
 }
 
 int connection_fire(lua_State* L);
@@ -967,9 +2665,9 @@ int connection_index(lua_State* L) {
         return 1;
     }
 
-    const std::uintptr_t weak = connection_weak_object(record->connection);
-    lua_State* thread = weak ? connection_thread(weak) : nullptr;
-    Closure* closure = weak ? connection_function(weak) : nullptr;
+    const ConnectionView view = connection_view(record->connection, L);
+    lua_State* thread = view.thread;
+    Closure* closure = view.closure;
     const bool foreign = thread && thread->global != L->global;
 
     if (std::strcmp(key, "ForeignState") == 0) {
@@ -977,7 +2675,9 @@ int connection_index(lua_State* L) {
         return 1;
     }
     if (std::strcmp(key, "LuaConnection") == 0) {
-        lua_pushboolean(L, closure != nullptr);
+        // A :Wait() slot has no Lua closure, but the thread suspended in the
+        // call makes it a Lua-visible connection all the same.
+        lua_pushboolean(L, closure != nullptr || thread != nullptr);
         return 1;
     }
     if (std::strcmp(key, "Function") == 0) {
@@ -1033,6 +2733,14 @@ int connection_spawn(lua_State* L, const char* method) {
         return 0;
     }
 
+    const bool once = connection_is_once(record->connection);
+
+    if (env_trace()) {
+        zend::logf("env.connection.%s: node=%p isC=%d once=%d args=%d", method,
+                   reinterpret_cast<void*>(record->connection),
+                   closure->isC ? 1 : 0, once ? 1 : 0, lua_gettop(L) - 1);
+    }
+
     const int argument_count = lua_gettop(L) - 1;
 
     lua_getglobal(L, "task");
@@ -1055,6 +2763,23 @@ int connection_spawn(lua_State* L, const char* method) {
         lua_pushvalue(L, index);
     }
     lua_call(L, argument_count + 1, 0);
+
+    if (once) {
+        std::uintptr_t slot_wrapper = 0;
+        if (read_ptr(record->connection + off::kConnectionSlotWrapper,
+                     slot_wrapper) &&
+            slot_wrapper) {
+            write<std::uint8_t>(slot_wrapper + off::kSlotWrapperOnceFired, 1);
+        }
+        // The engine unlinks an Once node after dispatch. Retire it here so a
+        // manual Fire/Defer behaves exactly like a natural engine fire.
+        retire_connection(record->connection);
+        record->valid = false;
+        if (env_trace()) {
+            zend::logf("env.connection.%s: once retired node=%p", method,
+                       reinterpret_cast<void*>(record->connection));
+        }
+    }
     return 0;
 }
 
@@ -1093,8 +2818,13 @@ int connection_disconnect(lua_State* L) {
     }
 
     // The reference only clears the enabled flag; the engine stops dispatching
-    // this connection on the next fire and the node is unlinked by its owner.
-    set_connection_enabled(record->connection, 0);
+    // this connection on the next fire. Track it so getconnections omits it even
+    // while the engine's node remains linked.
+    retire_connection(record->connection);
+    if (env_trace()) {
+        zend::logf("env.connection.disconnect: node=%p",
+                   reinterpret_cast<void*>(record->connection));
+    }
     record->valid = false;
     return 0;
 }
@@ -1124,6 +2854,9 @@ bool push_connection(lua_State* L, std::uintptr_t connection) {
     return true;
 }
 
+// Calls the engine's own Disconnect on a connection userdata. Only flips the
+// engine's enabled flag on this build, but that is exactly what we need to
+// retire a no-op sentinel without guessing its unlink layout.
 void disconnect_connection_userdata(lua_State* L, int index) {
     index = lua_absindex(L, index);
     lua_getfield(L, index, "Disconnect");
@@ -1138,6 +2871,21 @@ void disconnect_connection_userdata(lua_State* L, int index) {
     }
 }
 
+bool is_sentinel_connection(std::uintptr_t connection) {
+    const std::uintptr_t weak = connection_weak_object(connection);
+    if (!weak) {
+        return false;
+    }
+    const Closure* closure = connection_function(weak);
+    return closure && closure->isC && closure->c.f == connection_noop;
+}
+
+// Enumerating a signal needs a node that sits between us and the engine list:
+// the engine gives no public head pointer. We connect one no-op node per call,
+// walk from it (the engine prepends, so every real connection is behind it),
+// and the identity filter above keeps no-op nodes out of the result. The
+// sentinel is retired afterwards; Disconnect only clears its enabled flag, so
+// it stays linked but never dispatches and never shows up again.
 int getconnections(lua_State* L) {
     luaL_checktype(L, 1, LUA_TUSERDATA);
     if (std::strcmp(luaL_typename(L, 1), "RBXScriptSignal") != 0) {
@@ -1157,37 +2905,107 @@ int getconnections(lua_State* L) {
         luaL_error(L, "%s", message ? message : "getconnections: Connect failed");
     }
 
-    void* userdata = lua_touserdata(L, -1);
+    const int handle = lua_gettop(L);
+    void* userdata = lua_touserdata(L, handle);
     std::uintptr_t sentinel = 0;
-    if (lua_type(L, -1) == LUA_TLIGHTUSERDATA) {
+    if (lua_type(L, handle) == LUA_TLIGHTUSERDATA) {
         sentinel = reinterpret_cast<std::uintptr_t>(userdata);
     } else if (userdata) {
         read_ptr(reinterpret_cast<std::uintptr_t>(userdata), sentinel);
     }
 
     if (!sentinel) {
+        lua_settop(L, handle - 1);
         lua_newtable(L);
-        disconnect_connection_userdata(L, -2);
-        lua_remove(L, -2);
         return 1;
     }
 
     const ConnectionWalk walk = walk_connections(sentinel);
 
     lua_newtable(L);
-    disconnect_connection_userdata(L, -2);
-    lua_remove(L, -2);
-
     const int result = lua_gettop(L);
     int count = 0;
+    static int g_getconnections_calls = 0;
+    const int call_index = ++g_getconnections_calls;
+    if (env_trace()) {
+        zend::logf("env.getconnections: call=%d sentinel=%p nodes=%d", call_index,
+                   reinterpret_cast<void*>(sentinel), walk.count);
+    }
     for (int index = 0; index < walk.count; ++index) {
         const std::uintptr_t connection = walk.nodes[index];
-        if (!connection) {
+        std::uint64_t enabled = 0;
+        read_u64(connection + off::kConnectionEnabled, enabled);
+        const std::uintptr_t weak = connection_weak_object(connection);
+        const Closure* closure = weak ? connection_function(weak) : nullptr;
+        const bool c_closure = closure && closure->isC;
+        if (env_trace()) {
+            std::uintptr_t slot_wrapper = 0;
+            read_ptr(connection + off::kConnectionSlotWrapper, slot_wrapper);
+            zend::logf("env.getconnections:   [%d] node=%p enabled=%d weak=%p "
+                       "slot=%p closure=%p isC=%d sentinel=%d",
+                       index, reinterpret_cast<void*>(connection),
+                       enabled ? 1 : 0, reinterpret_cast<void*>(weak),
+                       reinterpret_cast<void*>(slot_wrapper),
+                       reinterpret_cast<const void*>(closure),
+                       c_closure ? 1 : 0,
+                       is_sentinel_connection(connection) ? 1 : 0);
+            if (index < 8) {
+                trace_raw_words("node", connection, 32);
+                trace_raw_words("slot", slot_wrapper, 40);
+                trace_raw_words("weak", weak, 24);
+                if (slot_wrapper &&
+                    slot_vtable(slot_wrapper) ==
+                        off::host_base() + off::kWaitSlotVftable) {
+                    trace_wait_slot(connection, slot_wrapper);
+                }
+                if (closure && !closure->isC && closure->l.p) {
+                    const Proto* proto = closure->l.p;
+                    zend::logf("env.getconnections:     proto=%p source=%p "
+                               "debugname=%p nups=%d numparams=%d",
+                               reinterpret_cast<const void*>(proto),
+                               reinterpret_cast<const void*>(proto->source.Get()),
+                               reinterpret_cast<const void*>(
+                                   proto->debugname.Get()),
+                               proto->nups, proto->numparams);
+                }
+            }
+        }
+        if (!connection || is_sentinel_connection(connection)) {
             continue;
         }
+
+        bool retired = false;
+        {
+            std::lock_guard<std::mutex> lock(g_retired_connections_mutex);
+            const auto entry = g_retired_connections.find(connection);
+            if (entry != g_retired_connections.end()) {
+                // A recycled node would have a different slot wrapper; a match
+                // on both fields is our retired connection.
+                retired = entry->second == 0 || entry->second == weak;
+                if (!retired) {
+                    g_retired_connections.erase(entry);
+                }
+            }
+        }
+        if (retired) {
+            if (env_trace()) {
+                zend::logf("env.getconnections:   [%d] retired", index);
+            }
+            continue;
+        }
+
         push_connection(L, connection);
         lua_rawseti(L, result, ++count);
     }
+    if (env_trace()) {
+        zend::logf("env.getconnections: call=%d returned=%d", call_index, count);
+    }
+
+    lua_pushvalue(L, handle);
+    disconnect_connection_userdata(L, -1);
+    lua_pop(L, 1);
+
+    lua_remove(L, handle);
     return 1;
 }
 
@@ -1255,6 +3073,1028 @@ bool instance_is_a(lua_State* L, int index, const char* class_name) {
     const bool match = lua_toboolean(L, -1) != 0;
     lua_pop(L, 1);
     return match;
+}
+
+// --- hidden properties and scriptable flags -------------------------------
+//
+// Property descriptors live in a hash table on the class descriptor: entry
+// pair offsets and the name field position vary per build, so probe them once
+// with the always-present `Name` property, then reuse the winning combination
+// for every class. The scriptable bit is at a fixed offset from the descriptor.
+
+constexpr std::uintptr_t kClassDescriptorOffset = 0x18;
+constexpr std::uintptr_t kPropertyEntrySize = 0x10;
+constexpr std::uint32_t kPropertyScriptableBit = 0x10;
+constexpr std::uintptr_t kPropertyBitFlags = 0xAC;
+constexpr std::uintptr_t kPropertyTypeInfo = 0x70;
+constexpr std::uintptr_t kPropertyTypeInfoAlt = 0x68;
+constexpr std::uintptr_t kPropertyTypeId = 0x30;
+constexpr int kTypeBinaryString = 30;
+constexpr int kTypeSharedString = 63;
+
+struct PropertyLayout {
+    bool probed = false;
+    bool ok = false;
+    std::uintptr_t entries = 0;
+    std::uintptr_t mask = 0;
+    std::uintptr_t name = 0;
+};
+
+PropertyLayout g_property_layout;
+
+std::map<std::uintptr_t, bool> g_pristine_scriptable;
+std::unordered_map<std::uintptr_t, std::unordered_map<std::string, bool>>
+    g_scriptable_overrides;
+
+bool text_equals_at(std::uintptr_t address, const char* text,
+                    std::size_t length) {
+    if (length > 256) {
+        return false;
+    }
+    char buffer[260];
+    if (!try_read_bytes(address, buffer, length + 1)) {
+        return false;
+    }
+    return std::memcmp(buffer, text, length) == 0 && buffer[length] == '\0';
+}
+
+bool property_name_equals(std::uintptr_t property, std::uintptr_t name_offset,
+                          const char* name) {
+    const std::size_t length = std::strlen(name);
+    std::uintptr_t holder = 0;
+    if (read_ptr(property + name_offset, holder) &&
+        text_equals_at(holder, name, length)) {
+        return true;
+    }
+    return text_equals_at(property + name_offset, name, length);
+}
+
+std::uintptr_t find_property_entry(std::uintptr_t class_descriptor,
+                                   const char* name,
+                                   std::uintptr_t entries_offset,
+                                   std::uintptr_t mask_offset,
+                                   std::uintptr_t name_offset) {
+    std::uintptr_t entries = 0;
+    std::uint32_t mask = 0;
+    if (!read_ptr(class_descriptor + entries_offset, entries) || !entries) {
+        return 0;
+    }
+    if (!read_u32(class_descriptor + mask_offset, mask) ||
+        mask == 0xFFFFFFFFu) {
+        return 0;
+    }
+    const std::uint32_t slots = mask + 1;
+    if (slots == 0 || slots > 8192) {
+        return 0;
+    }
+    for (std::uint32_t index = 0; index < slots; ++index) {
+        std::uintptr_t property = 0;
+        if (!read_ptr(entries + static_cast<std::uintptr_t>(index) *
+                                   kPropertyEntrySize,
+                      property) ||
+            !property) {
+            continue;
+        }
+        if (property_name_equals(property, name_offset, name)) {
+            return property;
+        }
+    }
+    return 0;
+}
+
+bool ensure_property_layout(std::uintptr_t instance) {
+    if (g_property_layout.probed) {
+        return g_property_layout.ok;
+    }
+    g_property_layout.probed = true;
+
+    std::uintptr_t class_descriptor = 0;
+    if (!instance ||
+        !read_ptr(instance + kClassDescriptorOffset, class_descriptor) ||
+        !class_descriptor) {
+        return false;
+    }
+
+    constexpr std::uintptr_t kEntryPairs[][2] = {{0x1F0, 0x1F8},
+                                                 {0x1E8, 0x1F0}};
+    constexpr std::uintptr_t kNameOffsets[] = {0x98, 0x90, 0xA0, 0x08};
+    for (const auto& pair : kEntryPairs) {
+        for (const std::uintptr_t name_offset : kNameOffsets) {
+            const std::uintptr_t property =
+                find_property_entry(class_descriptor, "Name", pair[0], pair[1],
+                                    name_offset);
+            if (property) {
+                g_property_layout.entries = pair[0];
+                g_property_layout.mask = pair[1];
+                g_property_layout.name = name_offset;
+                g_property_layout.ok = true;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+std::uintptr_t instance_raw_pointer(lua_State* L, int index) {
+    if (index < 0) {
+        index = lua_gettop(L) + index + 1;
+    }
+    if (!lua_isuserdata(L, index)) {
+        return 0;
+    }
+    void** block = static_cast<void**>(lua_touserdata(L, index));
+    std::uintptr_t raw = 0;
+    if (!block ||
+        !read_ptr(reinterpret_cast<std::uintptr_t>(block), raw) ||
+        !is_user_ptr(raw)) {
+        return 0;
+    }
+    return raw;
+}
+
+std::uintptr_t resolve_property(lua_State* L, int index, const char* name) {
+    index = lua_absindex(L, index);
+    check_instance(L, index);
+    const std::uintptr_t instance = instance_raw_pointer(L, index);
+    if (!instance || !ensure_property_layout(instance)) {
+        return 0;
+    }
+    std::uintptr_t class_descriptor = 0;
+    if (!read_ptr(instance + kClassDescriptorOffset, class_descriptor) ||
+        !class_descriptor) {
+        return 0;
+    }
+    return find_property_entry(class_descriptor, name,
+                               g_property_layout.entries,
+                               g_property_layout.mask, g_property_layout.name);
+}
+
+bool read_property_scriptable(std::uintptr_t property) {
+    std::uint32_t bits = 0;
+    if (!property || !read_u32(property + kPropertyBitFlags, bits)) {
+        return false;
+    }
+    return (bits & kPropertyScriptableBit) != 0;
+}
+
+bool write_property_scriptable(std::uintptr_t property, bool enabled) {
+    if (!property) {
+        return false;
+    }
+    const std::uintptr_t address = property + kPropertyBitFlags;
+    std::uint32_t bits = 0;
+    if (!read_u32(address, bits)) {
+        return false;
+    }
+    const std::uint32_t wanted =
+        enabled ? (bits | kPropertyScriptableBit)
+                : (bits & ~kPropertyScriptableBit);
+    if (wanted == bits) {
+        return true;
+    }
+    if (!write<std::uint32_t>(address, wanted)) {
+        return false;
+    }
+    std::uint32_t after = 0;
+    return read_u32(address, after) && after == wanted;
+}
+
+bool find_property_type(std::uintptr_t property, std::uintptr_t& type_address,
+                        int& type_id) {
+    type_address = 0;
+    type_id = -1;
+    std::uintptr_t descriptor = 0;
+    if (!read_ptr(property + kPropertyTypeInfo, descriptor) || !descriptor) {
+        if (!read_ptr(property + kPropertyTypeInfoAlt, descriptor) ||
+            !descriptor) {
+            return false;
+        }
+    }
+    type_address = descriptor + kPropertyTypeId;
+    std::uint32_t raw_type = 0;
+    if (!read_u32(type_address, raw_type)) {
+        type_address = 0;
+        type_id = -1;
+        return false;
+    }
+    type_id = static_cast<int>(raw_type);
+    return true;
+}
+
+int protected_getfield(lua_State* L) {
+    lua_getfield(L, 1, lua_tostring(L, 2));
+    return 1;
+}
+
+int protected_setfield(lua_State* L) {
+    lua_pushvalue(L, 3);
+    lua_setfield(L, 1, lua_tostring(L, 2));
+    return 0;
+}
+
+bool property_was_hidden(std::uintptr_t property) {
+    const auto pristine = g_pristine_scriptable.find(property);
+    if (pristine != g_pristine_scriptable.end()) {
+        return !pristine->second;
+    }
+    return !read_property_scriptable(property);
+}
+
+bool lookup_scriptable_override(std::uintptr_t instance, const char* name,
+                                bool& value) {
+    if (!instance || !name) {
+        return false;
+    }
+    const auto entry = g_scriptable_overrides.find(instance);
+    if (entry == g_scriptable_overrides.end()) {
+        return false;
+    }
+    const auto property = entry->second.find(name);
+    if (property == entry->second.end()) {
+        return false;
+    }
+    value = property->second;
+    return true;
+}
+
+// Reads a hidden BinaryString straight out of the instance field described by
+// the verified offset dump (dump/offsets_rbx.hpp). The property descriptor
+// getter is deliberately not used: calling it for Terrain.MaterialColors has
+// crashed the client, and the descriptor type must not be rewritten either.
+bool push_binary_string_field(lua_State* L, int index, std::uintptr_t instance,
+                              const char* name) {
+    // Terrain.MaterialColors is the only NotScriptable BinaryString in the API
+    // dump, and its payload is a std::vector<std::uint8_t> of RGB triples at
+    // this offset. Nothing else has a verified field here, so everything else
+    // keeps the normal property path.
+    constexpr std::uintptr_t kTerrainMaterialColors = 0x4A0;
+    if (!instance || !name || std::strcmp(name, "MaterialColors") != 0) {
+        return false;
+    }
+    if (instance_class_name(L, index) != "Terrain") {
+        return false;
+    }
+
+    std::uintptr_t begin = 0;
+    std::uintptr_t end = 0;
+    if (!read_ptr(instance + kTerrainMaterialColors, begin) ||
+        !read_ptr(instance + kTerrainMaterialColors + 0x8, end)) {
+        return false;
+    }
+    if (!is_user_ptr(begin) || end < begin) {
+        return false;
+    }
+
+    const std::uintptr_t length = end - begin;
+    if (length == 0 || length > (64u << 20)) {
+        return false;
+    }
+
+    std::string value(static_cast<std::size_t>(length), '\0');
+    if (!try_read_bytes(begin, value.data(), value.size())) {
+        return false;
+    }
+    lua_pushlstring(L, value.data(), value.size());
+    return true;
+}
+
+int gethiddenproperty(lua_State* L) {
+    check_instance(L, 1);
+    const char* name = luaL_checkstring(L, 2);
+
+    // `siz` is the historical hidden alias for Size that several executors
+    // expose; the reference API keeps it working for compatibility.
+    if (std::strcmp(name, "siz") == 0) {
+        lua_getfield(L, 1, "Size");
+        lua_pushboolean(L, 1);
+        return 2;
+    }
+
+    const std::uintptr_t property = resolve_property(L, 1, name);
+    if (!property) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    const bool hidden = property_was_hidden(property);
+    const std::uintptr_t instance = instance_raw_pointer(L, 1);
+
+    std::uintptr_t type_address = 0;
+    int type_id = -1;
+    find_property_type(property, type_address, type_id);
+
+    if (env_trace()) {
+        zend::logf("env.gethiddenproperty: class=%s prop=%s type=%d hidden=%d",
+                   instance_class_name(L, 1).c_str(), name, type_id,
+                   hidden ? 1 : 0);
+    }
+
+    if (type_id == kTypeBinaryString || type_id == kTypeSharedString) {
+        if (instance && push_binary_string_field(L, 1, instance, name)) {
+            lua_pushboolean(L, hidden ? 1 : 0);
+            return 2;
+        }
+        if (env_trace()) {
+            zend::logf("env.gethiddenproperty: no direct field for %s", name);
+        }
+        // Never rewrite a live binary/shared descriptor type: the engine's
+        // converter then treats the payload as a plain string, which has
+        // crashed the client on Terrain.MaterialColors.
+        if (hidden) {
+            lua_pushnil(L);
+            lua_pushboolean(L, 1);
+            return 2;
+        }
+    }
+
+    std::uintptr_t flags_address = property + kPropertyBitFlags;
+    std::uint32_t original_flags = 0;
+    if (!read_u32(flags_address, original_flags)) {
+        lua_pushnil(L);
+        lua_pushboolean(L, hidden ? 1 : 0);
+        return 2;
+    }
+
+    const bool flags_changed =
+        write<std::uint32_t>(flags_address,
+                             original_flags | kPropertyScriptableBit) &&
+        [&] {
+            std::uint32_t after = 0;
+            return read_u32(flags_address, after) &&
+                   after == (original_flags | kPropertyScriptableBit);
+        }();
+
+    const int top = lua_gettop(L);
+    lua_pushcfunction(L, protected_getfield, "gethiddenproperty");
+    lua_pushvalue(L, 1);
+    lua_pushstring(L, name);
+    const int status = lua_pcall(L, 2, 1, 0);
+
+    if (flags_changed) {
+        write<std::uint32_t>(flags_address, original_flags);
+    }
+
+    if (status != LUA_OK) {
+        lua_settop(L, top);
+        lua_pushnil(L);
+        lua_pushboolean(L, hidden ? 1 : 0);
+        return 2;
+    }
+
+    if (lua_type(L, top + 1) == LUA_TBUFFER) {
+        std::size_t length = 0;
+        void* data = lua_tobuffer(L, top + 1, &length);
+        const char* text = static_cast<const char*>(data);
+        if (!text) {
+            text = "";
+            length = 0;
+        }
+        lua_pushlstring(L, text, length);
+        lua_replace(L, top + 1);
+    }
+
+    lua_pushboolean(L, hidden ? 1 : 0);
+    return 2;
+}
+
+int sethiddenproperty(lua_State* L) {
+    check_instance(L, 1);
+    const char* name = luaL_checkstring(L, 2);
+    luaL_checkany(L, 3);
+
+    const std::uintptr_t property = resolve_property(L, 1, name);
+    if (!property) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    const bool hidden = property_was_hidden(property);
+    std::uintptr_t flags_address = property + kPropertyBitFlags;
+    std::uint32_t original_flags = 0;
+    if (!read_u32(flags_address, original_flags)) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    // Never rewrite the descriptor type of a live BinaryString/SharedString:
+    // the engine then treats the payload as a plain string, which crashed the
+    // client on Terrain.MaterialColors. Writing those values is not supported;
+    // the scriptable bit alone covers the regular properties.
+    std::uintptr_t type_address = 0;
+    int original_type = -1;
+    find_property_type(property, type_address, original_type);
+    if (env_trace()) {
+        zend::logf("env.sethiddenproperty: class=%s prop=%s type=%d hidden=%d "
+                   "value=%s",
+                   instance_class_name(L, 1).c_str(), name, original_type,
+                   hidden ? 1 : 0, luaL_typename(L, 3));
+    }
+    if (original_type == kTypeBinaryString ||
+        original_type == kTypeSharedString) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    const bool flags_changed =
+        hidden && write<std::uint32_t>(
+                      flags_address, original_flags | kPropertyScriptableBit);
+
+    const int top = lua_gettop(L);
+    lua_pushcfunction(L, protected_setfield, "sethiddenproperty");
+    lua_pushvalue(L, 1);
+    lua_pushstring(L, name);
+    lua_pushvalue(L, 3);
+    const int status = lua_pcall(L, 3, 0, 0);
+
+    if (flags_changed) {
+        write<std::uint32_t>(flags_address, original_flags);
+    }
+    lua_settop(L, top);
+
+    if (status != LUA_OK) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushboolean(L, hidden ? 1 : 0);
+    return 1;
+}
+
+int isscriptable(lua_State* L) {
+    check_instance(L, 1);
+    const char* name = luaL_checkstring(L, 2);
+
+    bool overridden = false;
+    if (lookup_scriptable_override(instance_raw_pointer(L, 1), name,
+                                   overridden)) {
+        lua_pushboolean(L, overridden ? 1 : 0);
+        return 1;
+    }
+
+    const std::uintptr_t property = resolve_property(L, 1, name);
+    if (!property) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    const auto pristine = g_pristine_scriptable.find(property);
+    if (pristine != g_pristine_scriptable.end()) {
+        lua_pushboolean(L, pristine->second ? 1 : 0);
+        return 1;
+    }
+    lua_pushboolean(L, read_property_scriptable(property) ? 1 : 0);
+    return 1;
+}
+
+int setscriptable(lua_State* L) {
+    check_instance(L, 1);
+    const char* name = luaL_checkstring(L, 2);
+    luaL_checktype(L, 3, LUA_TBOOLEAN);
+
+    const std::uintptr_t property = resolve_property(L, 1, name);
+    if (!property) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    const std::uintptr_t instance = instance_raw_pointer(L, 1);
+    const bool state = lua_toboolean(L, 3) != 0;
+
+    bool previous = false;
+    if (!lookup_scriptable_override(instance, name, previous)) {
+        const auto pristine = g_pristine_scriptable.find(property);
+        previous = pristine != g_pristine_scriptable.end()
+                       ? pristine->second
+                       : read_property_scriptable(property);
+    }
+
+    if (g_pristine_scriptable.find(property) ==
+        g_pristine_scriptable.end()) {
+        g_pristine_scriptable[property] = read_property_scriptable(property);
+    }
+
+    write_property_scriptable(property, state);
+
+    // The scriptable bit is enough for the regular properties. Rewriting the
+    // descriptor type of a BinaryString/SharedString made the engine convert
+    // the payload as a plain string, which crashed the client on
+    // Terrain.MaterialColors, so the type field is left untouched.
+
+    if (instance) {
+        g_scriptable_overrides[instance][name] = state;
+    }
+
+    lua_pushboolean(L, previous ? 1 : 0);
+    return 1;
+}
+
+int getcallbackvalue(lua_State* L) {
+    check_instance(L, 1);
+    const char* name = luaL_checkstring(L, 2);
+
+    const std::uintptr_t descriptor = resolve_property(L, 1, name);
+    if (!descriptor) {
+        luaL_argerror(L, 2, "callback property does not exist");
+    }
+
+    const std::uintptr_t instance = instance_raw_pointer(L, 1);
+    if (!instance) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    std::int32_t relative = 0;
+    if (!read(descriptor + 0x88, relative) || relative == 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    const std::uintptr_t holder = static_cast<std::uintptr_t>(
+        static_cast<std::intptr_t>(instance) +
+        static_cast<std::intptr_t>(relative));
+
+    std::uintptr_t our_global = 0;
+    read_ptr(reinterpret_cast<std::uintptr_t>(L) + off::kLuaGlobal, our_global);
+
+    auto same_vm = [&](std::uintptr_t live_ref) -> bool {
+        std::uintptr_t thread = 0;
+        std::uintptr_t callback_global = 0;
+        if (!read_ptr(live_ref + 0x28, thread) || !thread) {
+            return false;
+        }
+        if (!read_ptr(thread + off::kLuaGlobal, callback_global) ||
+            !callback_global) {
+            return false;
+        }
+        return our_global && callback_global == our_global;
+    };
+
+    auto push_live_ref = [&](std::uintptr_t live_ref) -> bool {
+        std::uint32_t ref_id = 0;
+        if (!read(live_ref + 0x34, ref_id) || ref_id == 0) {
+            return false;
+        }
+        if (!same_vm(live_ref)) {
+            return false;
+        }
+        lua_rawgeti(L, LUA_REGISTRYINDEX, static_cast<int>(ref_id));
+        if (lua_isfunction(L, -1)) {
+            return true;
+        }
+        lua_pop(L, 1);
+        return false;
+    };
+
+    const std::uintptr_t bases[] = {
+        holder,
+        holder >= 0x1F0 ? holder - 0x1F0 : 0,
+    };
+
+    for (const std::uintptr_t base : bases) {
+        if (!base) {
+            continue;
+        }
+        std::uintptr_t owner = 0;
+        std::uintptr_t callback = 0;
+        std::uintptr_t live_ref = 0;
+        if (!read_ptr(base + 0x18, owner) || !owner) {
+            continue;
+        }
+        if (!read_ptr(owner + 0x10, callback) || !callback) {
+            continue;
+        }
+        if (!read_ptr(callback + 0x10, live_ref) || !live_ref) {
+            continue;
+        }
+        if (push_live_ref(live_ref)) {
+            return 1;
+        }
+    }
+
+    for (const std::uintptr_t base : bases) {
+        if (!base) {
+            continue;
+        }
+        std::uintptr_t owner = 0;
+        std::uintptr_t callback = 0;
+        std::uintptr_t live_ref = 0;
+        if (!read_ptr(base + 0x18, owner) || !owner) {
+            continue;
+        }
+        if (!read_ptr(owner + 0x38, callback) || !callback) {
+            continue;
+        }
+        if (!read_ptr(callback + 0x18, live_ref) || !live_ref) {
+            continue;
+        }
+        if (push_live_ref(live_ref)) {
+            return 1;
+        }
+    }
+
+    {
+        constexpr std::uintptr_t kFields[] = {0x0, 0x10, 0x28};
+        constexpr int kDepth = 5;
+        struct Node {
+            std::uintptr_t address;
+            int depth;
+        };
+        Node stack[256];
+        int count = 0;
+        for (const std::uintptr_t base : bases) {
+            if (base && count < 256) {
+                stack[count++] = {base, 0};
+            }
+        }
+
+        while (count > 0) {
+            const Node node = stack[--count];
+            if (node.depth >= kDepth) {
+                continue;
+            }
+            for (const std::uintptr_t field : kFields) {
+                std::uintptr_t next = 0;
+                if (!read_ptr(node.address + field, next) || !next) {
+                    continue;
+                }
+                if (push_live_ref(next)) {
+                    return 1;
+                }
+                if (count < 256 && node.depth + 1 < kDepth) {
+                    stack[count++] = {next, node.depth + 1};
+                }
+            }
+        }
+    }
+
+    lua_pushnil(L);
+    return 1;
+}
+
+// --- instance cache, clones and hidden UI --------------------------------
+
+using PushInstanceFn = void(__fastcall*)(lua_State*, void*);
+
+__declspec(noinline) bool push_instance_raw(lua_State* L,
+                                            void* argument) noexcept {
+    __try {
+        auto push = reinterpret_cast<PushInstanceFn>(
+            off::host_base() + off::kPushInstance);
+        push(L, argument);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The client keeps one registry table that maps a lightuserdata instance
+// pointer to that instance's canonical userdata. Finding it once lets
+// cache.* and cloneref operate on the same table the engine uses, instead of
+// a parallel copy that would never be consulted.
+struct InstanceCache {
+    void* key = nullptr;
+    void* global = nullptr;
+};
+
+InstanceCache g_instance_cache;
+
+bool table_is_instance_cache(lua_State* L, int index) {
+    index = lua_absindex(L, index);
+    int checked = 0;
+    int matches = 0;
+
+    lua_pushnil(L);
+    while (lua_next(L, index) != 0) {
+        ++checked;
+
+        if (lua_type(L, -2) == LUA_TLIGHTUSERDATA &&
+            lua_isuserdata(L, -1) &&
+            std::strcmp(luaL_typename(L, -1), "Instance") == 0) {
+            void* block = lua_touserdata(L, -1);
+            std::uintptr_t raw = 0;
+            if (block &&
+                read_ptr(reinterpret_cast<std::uintptr_t>(block), raw) &&
+                raw == reinterpret_cast<std::uintptr_t>(
+                           lua_tolightuserdata(L, -2))) {
+                ++matches;
+            }
+        }
+
+        lua_pop(L, 1);
+        if (checked >= 16) {
+            break;
+        }
+    }
+
+    if (checked >= 16) {
+        lua_pop(L, 1); // the key lua_next left behind when we broke out
+    }
+    return matches > 0 && matches == checked;
+}
+
+bool push_instance_cache(lua_State* L) {
+    if (g_instance_cache.global == L->global && g_instance_cache.key) {
+        lua_pushlightuserdata(L, g_instance_cache.key);
+        lua_rawget(L, LUA_REGISTRYINDEX);
+        if (lua_istable(L, -1)) {
+            return true;
+        }
+        lua_pop(L, 1);
+    }
+
+    // The engine's canonical cache is the registry table whose entry for the
+    // raw `game` pointer is the very userdata scripts hold. Other tables can
+    // look similar (lightuserdata -> Instance), but clearing them has no effect
+    // on PushInstance.
+    const int top = lua_gettop(L);
+    lua_getglobal(L, "game");
+    const bool have_game =
+        lua_isuserdata(L, -1) &&
+        std::strcmp(luaL_typename(L, -1), "Instance") == 0;
+    void** game_slot =
+        have_game ? static_cast<void**>(lua_touserdata(L, -1)) : nullptr;
+    void* game_raw = game_slot ? *game_slot : nullptr;
+
+    if (game_raw) {
+        const int game_index = lua_gettop(L);
+        lua_pushvalue(L, LUA_REGISTRYINDEX);
+        const int registry = lua_gettop(L);
+
+        lua_pushnil(L);
+        while (lua_next(L, registry) != 0) {
+            if (lua_type(L, -2) == LUA_TLIGHTUSERDATA &&
+                lua_istable(L, -1)) {
+                lua_pushlightuserdata(L, game_raw);
+                lua_rawget(L, -2);
+                const bool hit =
+                    lua_isuserdata(L, -1) && lua_rawequal(L, -1, game_index);
+                lua_pop(L, 1);
+                if (hit) {
+                    const void* key = lua_tolightuserdata(L, -2);
+                    g_instance_cache.key = const_cast<void*>(key);
+                    g_instance_cache.global = L->global;
+
+                    lua_remove(L, -2); // the key, leaving registry + table
+                    lua_remove(L, registry);
+                    lua_remove(L, game_index);
+                    return true;
+                }
+            }
+            lua_pop(L, 1);
+        }
+
+        lua_settop(L, top);
+    } else {
+        lua_settop(L, top);
+    }
+
+    lua_pushvalue(L, LUA_REGISTRYINDEX);
+    const int registry = lua_gettop(L);
+
+    lua_pushnil(L);
+    while (lua_next(L, registry) != 0) {
+        if (lua_type(L, -2) == LUA_TLIGHTUSERDATA &&
+            lua_istable(L, -1) &&
+            table_is_instance_cache(L, lua_gettop(L))) {
+            const void* key = lua_tolightuserdata(L, -2);
+            g_instance_cache.key = const_cast<void*>(key);
+            g_instance_cache.global = L->global;
+
+            lua_remove(L, registry);
+            lua_remove(L, -2); // the key, leaving the cache table on top
+            return true;
+        }
+        lua_pop(L, 1);
+    }
+
+    lua_pop(L, 1); // registry
+    return false;
+}
+
+// Pushes the engine's canonical userdata for `raw`, if the instance cache still
+// holds one. This never creates a userdata: PushInstance takes a real
+// std::shared_ptr<Instance>, so a raw pointer cannot be turned into one safely.
+bool push_cached_instance(lua_State* L, std::uintptr_t raw) {
+    if (!raw) {
+        return false;
+    }
+    const int top = lua_gettop(L);
+    if (!push_instance_cache(L)) {
+        lua_settop(L, top);
+        return false;
+    }
+
+    const int cache = lua_gettop(L);
+    lua_pushlightuserdata(L, reinterpret_cast<void*>(raw));
+    lua_rawget(L, cache);
+
+    void** slot = lua_isuserdata(L, -1)
+                      ? static_cast<void**>(lua_touserdata(L, -1))
+                      : nullptr;
+    std::uintptr_t instance = 0;
+    if (!slot ||
+        std::strcmp(luaL_typename(L, -1), "Instance") != 0 ||
+        !read_ptr(reinterpret_cast<std::uintptr_t>(slot), instance) ||
+        instance != raw) {
+        lua_settop(L, top);
+        return false;
+    }
+
+    lua_remove(L, cache);
+    return true;
+}
+
+int cache_invalidate(lua_State* L) {
+    const std::uintptr_t raw = instance_value(L, 1);
+    if (!push_instance_cache(L)) {
+        luaL_error(L, "cache.invalidate: instance cache unavailable");
+    }
+
+    lua_pushlightuserdata(L, reinterpret_cast<void*>(raw));
+    lua_pushnil(L);
+    lua_rawset(L, -3);
+    return 0;
+}
+
+int cache_iscached(lua_State* L) {
+    const std::uintptr_t raw = instance_value(L, 1);
+    if (!push_instance_cache(L)) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    lua_pushlightuserdata(L, reinterpret_cast<void*>(raw));
+    lua_rawget(L, -2);
+    lua_pushboolean(L, lua_rawequal(L, -1, 1));
+    return 1;
+}
+
+int cache_replace(lua_State* L) {
+    const std::uintptr_t raw = instance_value(L, 1);
+    instance_value(L, 2);
+    if (!push_instance_cache(L)) {
+        luaL_error(L, "cache.replace: instance cache unavailable");
+    }
+
+    lua_pushlightuserdata(L, reinterpret_cast<void*>(raw));
+    lua_pushvalue(L, 2);
+    lua_rawset(L, -3);
+    return 0;
+}
+
+int cloneref(lua_State* L) {
+    const std::uintptr_t raw = instance_value(L, 1);
+    void* block = lua_touserdata(L, 1);
+    if (!raw || !block) {
+        lua_pushvalue(L, 1);
+        return 1;
+    }
+
+    // The engine consults its instance cache before creating a userdata, so a
+    // clone requires removing the canonical entry first. The entry is restored
+    // afterwards; the clone itself is left uncached, exactly like the
+    // reference implementation.
+    int cache_index = 0;
+    int saved_index = 0;
+    if (push_instance_cache(L)) {
+        cache_index = lua_gettop(L);
+        lua_pushlightuserdata(L, reinterpret_cast<void*>(raw));
+        lua_rawget(L, cache_index);
+        saved_index = lua_gettop(L);
+        lua_pushlightuserdata(L, reinterpret_cast<void*>(raw));
+        lua_pushnil(L);
+        lua_rawset(L, cache_index);
+    }
+
+    lua_getmetatable(L, 1);
+    const int metatable_index = lua_gettop(L);
+    const int before_push = lua_gettop(L);
+
+    bool pushed = false;
+    // Only the source userdata block is a real shared_ptr<Instance>. Handing
+    // PushInstance a raw pointer makes it adopt the adjacent stack word as the
+    // control block, which faults the GC later.
+    if (block && push_instance_raw(L, block) &&
+        lua_gettop(L) == before_push + 1 && lua_isuserdata(L, -1) &&
+        !lua_rawequal(L, -1, 1)) {
+        void** slot = static_cast<void**>(lua_touserdata(L, -1));
+        std::uintptr_t instance = 0;
+        if (slot &&
+            read_ptr(reinterpret_cast<std::uintptr_t>(slot), instance) &&
+            instance == raw) {
+            pushed = true;
+        }
+    }
+    if (!pushed) {
+        lua_settop(L, before_push);
+    }
+    const int clone_index = lua_gettop(L);
+
+    if (pushed && !lua_isnil(L, metatable_index)) {
+        lua_pushvalue(L, metatable_index);
+        lua_setmetatable(L, clone_index);
+    }
+
+    if (cache_index) {
+        lua_pushlightuserdata(L, reinterpret_cast<void*>(raw));
+        lua_pushvalue(L, saved_index);
+        lua_rawset(L, cache_index);
+    }
+
+    bool usable = pushed && clone_index > before_push;
+    if (usable) {
+        void** slot = static_cast<void**>(lua_touserdata(L, clone_index));
+        std::uintptr_t instance = 0;
+        usable = slot &&
+                 read_ptr(reinterpret_cast<std::uintptr_t>(slot), instance) &&
+                 instance == raw && !lua_rawequal(L, clone_index, 1);
+    }
+
+    if (!usable) {
+        lua_settop(L, 1);
+        lua_pushvalue(L, 1);
+        return 1;
+    }
+
+    lua_pushvalue(L, clone_index);
+    lua_replace(L, 1);
+    lua_settop(L, 1);
+    return 1;
+}
+
+int compareinstances(lua_State* L) {
+    const std::uintptr_t left = instance_value(L, 1);
+    const std::uintptr_t right = instance_value(L, 2);
+    lua_pushboolean(L, left == right);
+    return 1;
+}
+
+// A stable registry key for gethui's cached container. The reference uses a
+// string key, which cannot collide with lightuserdata keys used elsewhere.
+constexpr const char* kHuiRegistryKey = "__zen_hui";
+
+// Engine property reads (game.CoreGui in particular) are still gated by the
+// thread's identity, but gethui has to return a usable container even after a
+// script lowers its identity. Elevate only for the duration of the lookup and
+// restore the caller's mask afterwards.
+struct ScopedFullAccess {
+    RobloxExtraSpace* space = nullptr;
+    std::uint32_t identity = 0;
+    std::uint64_t capabilities = 0;
+
+    explicit ScopedFullAccess(lua_State* L) : space(L ? L->userdata : nullptr) {
+        if (space) {
+            identity = space->identity;
+            capabilities = space->capabilities;
+            space->identity = 8;
+            space->capabilities = ~std::uint64_t{0};
+        }
+    }
+
+    ~ScopedFullAccess() {
+        if (space) {
+            space->identity = identity;
+            space->capabilities = capabilities;
+        }
+    }
+};
+
+int gethui(lua_State* L) {
+    lua_getfield(L, LUA_REGISTRYINDEX, kHuiRegistryKey);
+    if (lua_isuserdata(L, -1) &&
+        std::strcmp(luaL_typename(L, -1), "Instance") == 0) {
+        return 1;
+    }
+    lua_pop(L, 1);
+
+    const int top = lua_gettop(L);
+    ScopedFullAccess access(L);
+    lua_getglobal(L, "game");
+    if (!lua_isuserdata(L, -1)) {
+        lua_settop(L, top);
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_getfield(L, -1, "CoreGui");
+    if (!lua_isuserdata(L, -1)) {
+        lua_settop(L, top);
+        lua_pushnil(L);
+        return 1;
+    }
+
+    const int coregui = lua_gettop(L);
+    lua_pushcclosure(L, cloneref, "gethui.cloneref", 0);
+    lua_pushvalue(L, coregui);
+    if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_isuserdata(L, -1)) {
+        lua_replace(L, coregui);
+    } else {
+        lua_settop(L, coregui);
+    }
+
+    lua_settop(L, coregui);
+    lua_pushvalue(L, coregui);
+    lua_setfield(L, LUA_REGISTRYINDEX, kHuiRegistryKey);
+    return 1;
 }
 
 // The reference fires the Lua-facing signal in both directions after the
@@ -1340,6 +4180,97 @@ int fireproximityprompt(lua_State* L) {
     auto fire = reinterpret_cast<FireProximityPromptFn>(
         off::host_base() + off::kFireProximityPrompt);
     fire(prompt);
+    return 0;
+}
+
+__declspec(noinline) bool call_click_dispatcher(std::uintptr_t fn,
+                                                std::uintptr_t self,
+                                                float distance,
+                                                std::uintptr_t who) noexcept {
+    __try {
+        reinterpret_cast<void(__fastcall*)(std::uintptr_t, float,
+                                           std::uintptr_t)>(fn)(self, distance,
+                                                                who);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+__declspec(noinline) bool call_hover_dispatcher(std::uintptr_t fn,
+                                                std::uintptr_t self,
+                                                std::uintptr_t who) noexcept {
+    __try {
+        reinterpret_cast<void(__fastcall*)(std::uintptr_t, std::uintptr_t)>(fn)(
+            self, who);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+std::uintptr_t local_player_value(lua_State* L) {
+    const int top = lua_gettop(L);
+    std::uintptr_t result = 0;
+
+    lua_getglobal(L, "game");
+    if (lua_isuserdata(L, -1)) {
+        lua_getfield(L, -1, "Players");
+        if (lua_isuserdata(L, -1)) {
+            lua_getfield(L, -1, "LocalPlayer");
+            if (lua_isuserdata(L, -1)) {
+                void* block = lua_touserdata(L, -1);
+                std::uintptr_t raw = 0;
+                if (block &&
+                    read_ptr(reinterpret_cast<std::uintptr_t>(block), raw)) {
+                    result = raw;
+                }
+            }
+        }
+    }
+
+    lua_settop(L, top);
+    return result;
+}
+
+int fireclickdetector(lua_State* L) {
+    const std::uintptr_t detector = instance_value(L, 1);
+    if (!instance_is_a(L, 1, "ClickDetector")) {
+        luaL_argerror(L, 1, "Expected a ClickDetector");
+    }
+
+    const float distance =
+        static_cast<float>(luaL_optnumber(L, 2, 0.0));
+    const char* event = luaL_optstring(L, 3, "MouseClick");
+
+    std::uintptr_t who = 0;
+    if (!lua_isnoneornil(L, 4)) {
+        who = instance_value(L, 4);
+    } else {
+        who = local_player_value(L);
+    }
+
+    std::uintptr_t fn = 0;
+    bool hover = false;
+    if (_stricmp(event, "MouseClick") == 0) {
+        fn = off::host_base() + off::kFireLeftMouseClick;
+    } else if (_stricmp(event, "RightMouseClick") == 0) {
+        fn = off::host_base() + off::kFireRightMouseClick;
+    } else if (_stricmp(event, "MouseHoverEnter") == 0) {
+        fn = off::host_base() + off::kFireMouseHoverEnter;
+        hover = true;
+    } else if (_stricmp(event, "MouseHoverLeave") == 0) {
+        fn = off::host_base() + off::kFireMouseHoverLeave;
+        hover = true;
+    } else {
+        return 0;
+    }
+
+    const bool ok = hover ? call_hover_dispatcher(fn, detector, who)
+                          : call_click_dispatcher(fn, detector, distance, who);
+    if (!ok) {
+        luaL_error(L, "fireclickdetector: the engine call faulted");
+    }
     return 0;
 }
 
@@ -1605,6 +4536,192 @@ int getsignalargumentsinfo(lua_State* L) {
         lua_rawseti(L, result, ++count);
     }
     return 1;
+}
+
+// --- replicatesignal ------------------------------------------------------
+//
+// The event instance knows its descriptor (parameter signature) and its owner
+// (the RemoteEvent-like engine object). The owner's vtable slot +0x18 raises
+// the event to the server; the arguments travel as Variants produced by the
+// client's own CastArgs, so instances, enums and vectors keep their real
+// representation instead of a hand-built guess.
+
+struct ReplicateVariant {
+    struct Storage {
+        const void* holder;
+        char data[64];
+    };
+    const void* type;
+    Storage value;
+};
+
+static_assert(sizeof(ReplicateVariant) == 80,
+              "Variant layout must match the client's argument struct");
+
+enum class EventTargetInclusion : std::int32_t {
+    only_target = 0,
+    exclude_target = 1,
+};
+
+struct RemoteEventInvocationTargetOptions {
+    const void* target;
+    EventTargetInclusion is_exclude_target;
+};
+
+using CastArgsFn =
+    void(__fastcall*)(lua_State*, int, ReplicateVariant*, bool, int);
+using RaiseSignalFn =
+    void(__fastcall*)(std::uintptr_t*, std::uintptr_t*,
+                      std::vector<ReplicateVariant>*,
+                      RemoteEventInvocationTargetOptions*);
+
+__declspec(noinline) bool cast_signal_argument(lua_State* L, int index,
+                                               ReplicateVariant* out) {
+    __try {
+        auto cast =
+            reinterpret_cast<CastArgsFn>(off::host_base() + off::kCastArgs);
+        cast(L, index, out, true, 0);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+__declspec(noinline) bool raise_event_signal(
+    std::uintptr_t owner, std::uintptr_t descriptor,
+    std::vector<ReplicateVariant>& values) {
+    std::uintptr_t vtable = 0;
+    if (!read_ptr(owner, vtable) || !is_user_ptr(vtable)) {
+        return false;
+    }
+    std::uintptr_t raise = 0;
+    if (!read_ptr(vtable + 0x18, raise) || !is_user_ptr(raise)) {
+        return false;
+    }
+
+    RemoteEventInvocationTargetOptions options{};
+    options.target = nullptr;
+    options.is_exclude_target = EventTargetInclusion::only_target;
+
+    __try {
+        auto call = reinterpret_cast<RaiseSignalFn>(raise);
+        call(reinterpret_cast<std::uintptr_t*>(owner),
+             reinterpret_cast<std::uintptr_t*>(descriptor), &values, &options);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+int replicatesignal(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TUSERDATA);
+    if (std::strcmp(luaL_typename(L, 1), "RBXScriptSignal") != 0) {
+        luaL_typeerror(L, 1, "RBXScriptSignal");
+    }
+
+    const std::uintptr_t payload =
+        reinterpret_cast<std::uintptr_t>(lua_touserdata(L, 1));
+    std::uintptr_t event_instance = 0;
+    std::uintptr_t descriptor = 0;
+    if (!is_user_ptr(payload) || !read_ptr(payload, event_instance) ||
+        !is_user_ptr(event_instance) ||
+        !read_ptr(event_instance, descriptor) || !is_user_ptr(descriptor)) {
+        luaL_error(L, "replicatesignal: invalid signal");
+    }
+
+    std::vector<std::uintptr_t> parameters;
+    std::uintptr_t signature = 0;
+    std::uintptr_t signature_end = 0;
+    if (signal_signature(L, 1, signature, signature_end)) {
+        for (std::uintptr_t parameter = signature;
+             parameter + off::kSignalTypeStride <= signature_end &&
+             parameters.size() < 256;
+             parameter += off::kSignalTypeStride) {
+            std::uintptr_t type = 0;
+            std::uint32_t identifier = 0;
+            if (!read_ptr(parameter + off::kSignalParameterType, type) ||
+                !is_user_ptr(type) ||
+                !read_u32(type + off::kSignalTypeId, identifier)) {
+                parameters.clear();
+                break;
+            }
+            parameters.push_back(type);
+        }
+    }
+
+    const int provided = lua_gettop(L) - 1;
+    if (provided != static_cast<int>(parameters.size())) {
+        luaL_error(L, "replicatesignal: expected %d argument(s), got %d",
+                   static_cast<int>(parameters.size()), provided);
+    }
+
+    std::vector<ReplicateVariant> values;
+    values.reserve(parameters.size());
+
+    int argument = 2;
+    for (const std::uintptr_t wanted : parameters) {
+        ReplicateVariant value{};
+        if (!cast_signal_argument(L, argument, &value)) {
+            luaL_error(L, "replicatesignal: could not convert argument %d",
+                       argument - 1);
+        }
+
+        if (!value.type) {
+            ++argument;
+            continue;
+        }
+
+        std::uint32_t wanted_id = 0;
+        std::uint32_t actual_id = 0;
+        read_u32(wanted + off::kSignalTypeId, wanted_id);
+        read_u32(reinterpret_cast<std::uintptr_t>(value.type) +
+                     off::kSignalTypeId,
+                 actual_id);
+
+        if (wanted_id != actual_id) {
+            // Numbers arrive as doubles; the engine expects the exact wire
+            // width of the parameter type. Only numeric conversions are safe
+            // to retag without a type-specific constructor.
+            char* data = const_cast<char*>(value.value.data);
+            switch (wanted_id) {
+                case 2: {
+                    const std::int32_t number =
+                        static_cast<std::int32_t>(lua_tonumber(L, argument));
+                    std::memcpy(data, &number, sizeof(number));
+                    value.type = reinterpret_cast<const void*>(wanted);
+                    break;
+                }
+                case 3: {
+                    const std::int64_t number = static_cast<std::int64_t>(
+                        std::llround(lua_tonumber(L, argument)));
+                    std::memcpy(data, &number, sizeof(number));
+                    value.type = reinterpret_cast<const void*>(wanted);
+                    break;
+                }
+                case 4: {
+                    const float number =
+                        static_cast<float>(lua_tonumber(L, argument));
+                    std::memcpy(data, &number, sizeof(number));
+                    value.type = reinterpret_cast<const void*>(wanted);
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+
+        values.push_back(value);
+        ++argument;
+    }
+
+    std::uintptr_t owner = 0;
+    if (!read_ptr(event_instance + 0x18, owner) || !is_user_ptr(owner)) {
+        luaL_error(L, "replicatesignal: invalid signal owner");
+    }
+    if (!raise_event_signal(owner, descriptor, values)) {
+        luaL_error(L, "replicatesignal: signal could not be raised");
+    }
+    return 0;
 }
 
 // hooksignal installs a Lua wrapper into every live Luau connection's slot.
@@ -1903,8 +5020,6 @@ int make_writeable(lua_State* L) {
 
 // --- closures ------------------------------------------------------------
 
-std::unordered_set<Closure*> g_own_closures;
-
 int iscclosure(lua_State* L) {
     lua_pushboolean(L, lua_isfunction(L, 1) && lua_iscfunction(L, 1));
     return 1;
@@ -1912,6 +5027,305 @@ int iscclosure(lua_State* L) {
 
 int islclosure(lua_State* L) {
     lua_pushboolean(L, lua_isfunction(L, 1) && !lua_iscfunction(L, 1));
+    return 1;
+}
+
+int isexecutorclosure(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+    Closure* closure = clvalue(luaA_toobject(L, 1));
+
+    const bool ours =
+        closure &&
+        (g_own_closures.contains(closure) ||
+         (!closure->isC && executor::owns_proto(closure->l.p)));
+    lua_pushboolean(L, ours ? 1 : 0);
+    return 1;
+}
+
+// --- filtergc ------------------------------------------------------------
+
+bool closure_is_executor_owned(Closure* closure) {
+    return closure &&
+           (g_own_closures.contains(closure) ||
+            (!closure->isC && closure->l.p &&
+             executor::owns_proto(closure->l.p)));
+}
+
+bool table_filter_has_all(lua_State* L, int candidate, int options,
+                          const char* field, int mode) {
+    lua_getfield(L, options, field);
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return true;
+    }
+    const int wanted = lua_gettop(L);
+
+    bool ok = true;
+    lua_pushnil(L);
+    while (ok && lua_next(L, wanted) != 0) {
+        bool found = false;
+        lua_pushnil(L);
+        while (!found && lua_next(L, candidate) != 0) {
+            if (mode == 0) {
+                found = lua_rawequal(L, -2, -3) != 0;
+            } else if (mode == 1) {
+                found = lua_rawequal(L, -1, -3) != 0;
+            } else {
+                found = lua_rawequal(L, -2, -4) != 0 &&
+                        lua_rawequal(L, -1, -3) != 0;
+            }
+            lua_pop(L, 1);
+            if (found) {
+                lua_pop(L, 1);
+                break;
+            }
+        }
+        ok = found;
+        lua_pop(L, 1); // the wanted value (or the leftover key)
+    }
+    lua_pop(L, 1); // the wanted table (or the leftover key)
+    return ok;
+}
+
+bool filter_value_equal(lua_State* L, int left, int right) {
+    // NaN is never equal to itself under IEEE comparison, but filtergc callers
+    // legitimately use debug.getconstant to obtain NaN and match the same slot.
+    if (lua_isnumber(L, left) && lua_isnumber(L, right)) {
+        const double a = lua_tonumber(L, left);
+        const double b = lua_tonumber(L, right);
+        if (std::isnan(a) && std::isnan(b)) {
+            return true;
+        }
+    }
+    return lua_rawequal(L, left, right) != 0;
+}
+
+bool function_filter_matches(lua_State* L, int candidate, int options,
+                             bool ignore_executor) {
+    const int base = lua_gettop(L);
+    Closure* closure = lua_isfunction(L, candidate)
+                           ? clvalue(luaA_toobject(L, candidate))
+                           : nullptr;
+
+    if (ignore_executor && closure_is_executor_owned(closure)) {
+        return false;
+    }
+
+    lua_getfield(L, options, "Name");
+    if (lua_isstring(L, -1)) {
+        const std::string wanted = lua_tostring(L, -1);
+        lua_Debug ar;
+        std::memset(&ar, 0, sizeof(ar));
+        lua_pushvalue(L, candidate);
+        const bool have_info = lua_getinfo(L, -1, "n", &ar) != 0;
+        lua_pop(L, 1);
+        if (!have_info || !ar.name || wanted != ar.name) {
+            lua_settop(L, base);
+            return false;
+        }
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, options, "Hash");
+    if (lua_isstring(L, -1)) {
+        const std::string wanted = lua_tostring(L, -1);
+        if (!closure || closure->isC || !closure->l.p ||
+            hash_function_proto(closure->l.p) != wanted) {
+            lua_settop(L, base);
+            return false;
+        }
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, options, "Constants");
+    if (lua_istable(L, -1)) {
+        const int wanted = lua_gettop(L);
+        if (!closure || closure->isC || !closure->l.p) {
+            lua_settop(L, base);
+            return false;
+        }
+        const int count = static_cast<int>(lua_objlen(L, wanted));
+        for (int index = 1; index <= count; ++index) {
+            lua_rawgeti(L, wanted, index);
+            bool hit = false;
+            for (int k = 0; k < closure->l.p->sizek && !hit; ++k) {
+                luaA_pushvalue(L, &closure->l.p->k[k]);
+                hit = filter_value_equal(L, -1, -2);
+                lua_pop(L, 1);
+            }
+            lua_pop(L, 1);
+            if (!hit) {
+                lua_settop(L, base);
+                return false;
+            }
+        }
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, options, "Upvalues");
+    if (lua_istable(L, -1)) {
+        const int wanted = lua_gettop(L);
+        bool complete = true;
+        lua_pushnil(L);
+        while (lua_next(L, wanted) != 0) {
+            bool hit = false;
+            for (int index = 1;; ++index) {
+                if (!lua_getupvalue(L, candidate, index)) {
+                    break;
+                }
+                hit = filter_value_equal(L, -1, -2);
+                lua_pop(L, 1);
+                if (hit) {
+                    break;
+                }
+            }
+            lua_pop(L, 1); // the wanted value
+            if (!hit) {
+                complete = false;
+                lua_pop(L, 1); // the key lua_next left on the stack
+                break;
+            }
+        }
+        lua_settop(L, wanted - 1); // drop the Upvalues table
+        if (!complete) {
+            lua_settop(L, base);
+            return false;
+        }
+    } else {
+        lua_pop(L, 1);
+    }
+    lua_settop(L, base);
+    return true;
+}
+
+bool table_filter_matches(lua_State* L, int candidate, int options) {
+    const int base = lua_gettop(L);
+    bool keep = table_filter_has_all(L, candidate, options, "Keys", 0) &&
+                table_filter_has_all(L, candidate, options, "Values", 1) &&
+                table_filter_has_all(L, candidate, options, "KeyValuePairs", 2);
+
+    if (keep) {
+        lua_getfield(L, options, "Metatable");
+        if (!lua_isnil(L, -1)) {
+            keep = lua_getmetatable(L, candidate) != 0;
+            if (keep) {
+                keep = lua_rawequal(L, -1, -2) != 0;
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1);
+    }
+
+    lua_settop(L, base);
+    return keep;
+}
+
+int filtergc(lua_State* L) {
+    const char* kind = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+    const bool return_one = !lua_isnoneornil(L, 3) && lua_toboolean(L, 3) != 0;
+
+    const bool want_function = std::strcmp(kind, "function") == 0;
+    const bool want_table = std::strcmp(kind, "table") == 0;
+    if (!want_function && !want_table) {
+        luaL_argerror(L, 1, "expected 'function' or 'table'");
+    }
+
+    bool ignore_executor = true;
+    if (want_function) {
+        lua_getfield(L, 2, "IgnoreExecutor");
+        if (!lua_isnil(L, -1)) {
+            ignore_executor = lua_toboolean(L, -1) != 0;
+        }
+        lua_pop(L, 1);
+    }
+
+    if (env_trace()) {
+        zend::logf("env.filtergc: kind=%s return_one=%d ignore_executor=%d",
+                   kind, return_one ? 1 : 0, ignore_executor ? 1 : 0);
+        lua_getfield(L, 2, "Upvalues");
+        if (lua_istable(L, -1)) {
+            const int count = static_cast<int>(lua_objlen(L, -1));
+            zend::logf("env.filtergc: Upvalues count=%d", count);
+            for (int index = 1; index <= count && index <= 8; ++index) {
+                lua_rawgeti(L, -1, index);
+                if (lua_type(L, -1) == LUA_TNUMBER) {
+                    zend::logf("env.filtergc: Upvalues[%d]=number %.17g", index,
+                               lua_tonumber(L, -1));
+                } else if (lua_type(L, -1) == LUA_TSTRING) {
+                    zend::logf("env.filtergc: Upvalues[%d]=string len=%zu", index,
+                               lua_objlen(L, -1));
+                } else {
+                    zend::logf("env.filtergc: Upvalues[%d]=%s", index,
+                               luaL_typename(L, -1));
+                }
+                lua_pop(L, 1);
+            }
+        } else if (!lua_isnil(L, -1)) {
+            zend::logf("env.filtergc: Upvalues is %s", luaL_typename(L, -1));
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, 2, "Constants");
+        if (lua_istable(L, -1)) {
+            zend::logf("env.filtergc: Constants count=%d",
+                       static_cast<int>(lua_objlen(L, -1)));
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, 2, "Name");
+        if (lua_isstring(L, -1)) {
+            zend::logf("env.filtergc: Name=%s", lua_tostring(L, -1));
+        }
+        lua_pop(L, 1);
+    }
+
+    collect_gc_type(L, want_table ? LUA_TTABLE : LUA_TFUNCTION);
+    const int pool = lua_gettop(L);
+    lua_newtable(L);
+    const int out = lua_gettop(L);
+    int found = 0;
+
+    const int count = static_cast<int>(lua_objlen(L, pool));
+    if (env_trace()) {
+        zend::logf("env.filtergc: candidates=%d", count);
+    }
+    for (int index = 1; index <= count; ++index) {
+        lua_rawgeti(L, pool, index);
+        const int candidate = lua_gettop(L);
+        bool keep = false;
+
+        if (want_function && lua_isfunction(L, candidate)) {
+            keep = function_filter_matches(L, candidate, 2, ignore_executor);
+        } else if (want_table && lua_istable(L, candidate)) {
+            keep = table_filter_matches(L, candidate, 2);
+        }
+
+        if (keep) {
+            if (return_one) {
+                if (env_trace()) {
+                    zend::logf("env.filtergc: matched at %d", index);
+                }
+                lua_pushvalue(L, candidate);
+                lua_replace(L, pool);
+                lua_settop(L, pool);
+                return 1;
+            }
+            lua_pushvalue(L, candidate);
+            lua_rawseti(L, out, ++found);
+        }
+        lua_settop(L, out);
+    }
+
+    if (env_trace()) {
+        zend::logf("env.filtergc: found=%d", found);
+    }
+
+    if (return_one) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushvalue(L, out);
+    lua_replace(L, pool);
+    lua_settop(L, pool);
     return 1;
 }
 
@@ -2119,6 +5533,26 @@ int hook_lua_dispatch(lua_State* L) {
         luaL_error(L, "hookfunction: missing Lua hook");
     }
     return call_function_ref(L, it->second.hook_ref);
+}
+
+// A Lua-target hook costs two frames the reference implementation does not
+// have: the replaced closure's dispatcher proto and the C function that calls
+// the user's hook. They are an implementation detail, so level-based debug
+// APIs must not count them. C-target hooks keep their own frame (the target's
+// activation), so hook_c_dispatch and newc_dispatch stay visible.
+bool is_hook_plumbing_frame(CallInfo* frame) {
+    if (!frame || !frame->func || !ttisfunction(frame->func)) {
+        return false;
+    }
+    Closure* closure = clvalue(frame->func);
+    if (closure->isC) {
+        return closure->c.f == hook_lua_dispatch;
+    }
+    const TString* source = closure->l.p ? closure->l.p->source : nullptr;
+    constexpr char kDispatcherSource[] = "=zend-hookfunction";
+    return source && source->len == sizeof(kDispatcherSource) - 1 &&
+           std::memcmp(getstr(source), kDispatcherSource,
+                       sizeof(kDispatcherSource) - 1) == 0;
 }
 
 // Builds one dispatcher proto per hooked Lua target. Keeping it per-target
@@ -2660,6 +6094,25 @@ int debug_getinfo(lua_State* L) {
     return 1;
 }
 
+int debug_getlocal(lua_State* L) {
+    const int level = static_cast<int>(luaL_checkinteger(L, 1));
+    const int index = static_cast<int>(luaL_checkinteger(L, 2));
+    if (level <= 0) {
+        luaL_argerror(L, 1, "level must be positive");
+    }
+
+    const char* name = lua_getlocal(L, level, index);
+    if (!name) {
+        luaL_argerror(L, 2, "index out of range");
+    }
+
+    // lua_getlocal pushed the value; return name, value like the stock Lua
+    // debug library so callers can dump a frame without guessing indices.
+    lua_pushstring(L, name);
+    lua_insert(L, -2);
+    return 2;
+}
+
 int debug_getconstants(lua_State* L) {
     const int fn = push_function_arg(L, 1);
     Closure* closure = lua_closure(L, fn, false);
@@ -2720,12 +6173,19 @@ int debug_setupvalue(lua_State* L) {
     return 1;
 }
 
-CallInfo* visible_level(lua_State* L, int level) {
-    for (CallInfo* frame = L->ci - 1; frame >= L->base_ci; --frame) {
-        if (!frame->func || !ttisfunction(frame->func)) {
+// `include_current` selects what level 1 means. For the calling thread the
+// current frame is this debug API's own C frame, so level 1 is its caller
+// (Lua convention). A foreign thread has no such debug frame and is usually
+// suspended inside `yield`, so level 1 must be that thread's own top frame.
+// Frames every other debug API sees are counted, C frames included: the
+// reference numbers `pcall` and friends. Only our hook trampoline is hidden.
+CallInfo* visible_level(lua_State* L, int level, bool include_current = false) {
+    CallInfo* start = include_current ? L->ci : L->ci - 1;
+    for (CallInfo* frame = start; frame >= L->base_ci; --frame) {
+        if (is_hook_plumbing_frame(frame)) {
             continue;
         }
-        if (clvalue(frame->func)->isC) {
+        if (!frame->func || !ttisfunction(frame->func)) {
             continue;
         }
         if (--level == 0) {
@@ -2796,22 +6256,85 @@ CallInfo* resolve_stack_target(lua_State* L, int index, Closure*& out_closure) {
 }
 
 // Copies a proto for an inactive debug.getproto(s) result. The copy keeps the
-// metadata scripts inspect (constants, names, line info) but its bytecode is a
-// plain `return`, so calling it cannot execute the original code.
+// metadata scripts inspect (constants, debug name, source, arity, line) but its
+// code is the compiler's empty `return` chunk, so native debug.info still sees
+// the original definition while calling the proxy cannot run the game's
+// bytecode. Hand-built instructions are not an option: opcode bytes in this
+// build are permuted, and a wrong byte executes arbitrary VM operations.
+// The clone's bytecode is the compiler's own `return` chunk, copied
+// instruction for instruction (the reference does the same). Opcodes are not
+// assemblable by hand: the client's bytecode carries every opcode permuted
+// through the build's 256-entry wire table, and only compiler output (encoded
+// by WireEncoder) is guaranteed to carry that numbering. The loaded proto is
+// only a source of instructions, so its bytes are cached once and the temp
+// closure is dropped.
+struct StubCode {
+    std::vector<Instruction> code;
+    int maxstacksize = 0;
+    bool valid = false;
+};
+
+const StubCode& return_stub(lua_State* L) {
+    static const StubCode stub = [L]() {
+        StubCode result;
+        static const std::string bytecode = compile("return");
+        if (bytecode.empty() || bytecode[0] == '\0') {
+            return result;
+        }
+        if (luau_load(L, "@cloneproto", bytecode.data(), bytecode.size(), 0) !=
+            0) {
+            return result;
+        }
+
+        Closure* loaded = lua_isfunction(L, -1)
+                              ? clvalue(const_cast<TValue*>(
+                                    luaA_toobject(L, -1)))
+                              : nullptr;
+        if (loaded && !loaded->isC && loaded->l.p &&
+            loaded->l.p->sizecode > 0) {
+            result.code.assign(loaded->l.p->code,
+                               loaded->l.p->code + loaded->l.p->sizecode);
+            result.maxstacksize = loaded->l.p->maxstacksize;
+            result.valid = true;
+        }
+        lua_pop(L, 1);
+        return result;
+    }();
+    return stub;
+}
+
 Proto* clone_proto(lua_State* L, Proto* proto) {
+    const StubCode& stub = return_stub(L);
+    if (!stub.valid) {
+        return nullptr;
+    }
+
+    const int sizecode = static_cast<int>(stub.code.size());
+
     Proto* clone = luaF_newproto(L);
     if (!clone) {
         return nullptr;
     }
 
     clone->is_vararg = proto->is_vararg;
-    clone->flags = proto->flags;
+    clone->flags = 0;
     clone->maxstacksize = proto->maxstacksize;
+    if (stub.maxstacksize > clone->maxstacksize) {
+        clone->maxstacksize = stub.maxstacksize;
+    }
+    if (clone->maxstacksize < 2) {
+        clone->maxstacksize = 2;
+    }
     clone->nups = proto->nups;
     clone->numparams = proto->numparams;
     clone->linedefined = proto->linedefined;
     clone->bytecodeid = proto->bytecodeid;
-    clone->linegaplog2 = proto->linegaplog2;
+
+    clone->code = luaM_newarray(L, sizecode, Instruction, clone->memcat);
+    std::memcpy(clone->code, stub.code.data(),
+                sizeof(Instruction) * static_cast<std::size_t>(sizecode));
+    clone->sizecode = sizecode;
+    clone->codeentry = clone->code;
 
     if (proto->sizek > 0 && proto->k) {
         clone->k = luaM_newarray(L, proto->sizek, TValue, clone->memcat);
@@ -2821,20 +6344,20 @@ Proto* clone_proto(lua_State* L, Proto* proto) {
         clone->sizek = proto->sizek;
     }
 
-    if (proto->sizelineinfo > 0) {
-        const uint8_t* source_lineinfo = proto->lineinfo;
-        if (source_lineinfo) {
-            clone->lineinfo = luaM_newarray(L, proto->sizelineinfo, uint8_t,
-                                            clone->memcat);
-            uint8_t* lineinfo = clone->lineinfo;
-            std::memcpy(lineinfo, source_lineinfo, proto->sizelineinfo);
-            clone->sizelineinfo = proto->sizelineinfo;
-
-            // The absolute-line array shares the lineinfo allocation.
-            const int absoffset = (proto->sizecode + 3) & ~3;
-            clone->abslineinfo =
-                reinterpret_cast<int*>(lineinfo + absoffset);
-        }
+    // The stub's line info is rebuilt in the loader's layout: a flat byte
+    // array followed by the absolute-line array it shares storage with. Gap 0
+    // gives every pc its own absolute entry, so luaG_getline never reads past
+    // the allocation while the call fails.
+    clone->linegaplog2 = 0;
+    const int absoffset = (sizecode + 3) & ~3;
+    const int intervals = sizecode;
+    const int lineinfo_size = absoffset + intervals * static_cast<int>(sizeof(int));
+    clone->lineinfo = luaM_newarray(L, lineinfo_size, uint8_t, clone->memcat);
+    std::memset(clone->lineinfo, 0, absoffset);
+    clone->sizelineinfo = lineinfo_size;
+    clone->abslineinfo = reinterpret_cast<int*>(clone->lineinfo + absoffset);
+    for (int i = 0; i < intervals; ++i) {
+        clone->abslineinfo[i] = proto->linedefined;
     }
 
     if (proto->sizelocvars > 0 && proto->locvars) {
@@ -2859,27 +6382,11 @@ Proto* clone_proto(lua_State* L, Proto* proto) {
         }
     }
 
-    clone->source = proto->source;
-    clone->debugname = proto->debugname;
-
-    const std::string bytecode = compile("return");
-    if (luau_load(L, "=zend-getproto", bytecode.data(), bytecode.size(), 0) ==
-        0) {
-        Closure* loader = clvalue(luaA_toobject(L, -1));
-        const Proto* harmless = loader ? loader->l.p : nullptr;
-        if (harmless && harmless->sizecode > 0 && harmless->code) {
-            clone->code = luaM_newarray(L, harmless->sizecode, uint32_t,
-                                        clone->memcat);
-            for (int i = 0; i < harmless->sizecode; ++i) {
-                clone->code[i] = harmless->code[i];
-            }
-            clone->sizecode = harmless->sizecode;
-            clone->codeentry = clone->code;
-        }
-        lua_pop(L, 1);
-    } else {
-        lua_pop(L, 1);
-    }
+    // These two fields are pointer-encoded relative to their own address, so
+    // assigning one encoded field to another would carry the source address.
+    // Decode first, then let the target field encode for its own address.
+    clone->source = proto->source.Get();
+    clone->debugname = proto->debugname.Get();
 
     if (proto->sizep > 0 && proto->p) {
         clone->p = luaM_newarray(L, proto->sizep, Proto*, clone->memcat);
@@ -2893,27 +6400,50 @@ Proto* clone_proto(lua_State* L, Proto* proto) {
 }
 
 struct ProtoClosureScan {
-    lua_State* L;
-    int result;
-    int count;
     Proto* wanted;
+    std::vector<Closure*> found;
 };
 
 bool proto_closure_visitor(void* raw, lua_Page*, GCObject* gco) {
     auto* scan = static_cast<ProtoClosureScan*>(raw);
-    lua_State* L = scan->L;
-    if (isdead(L->global, gco) || gco->gch.tt != LUA_TFUNCTION) {
+    if (gco->gch.tt != LUA_TFUNCTION) {
         return false;
     }
 
     Closure* closure = gco2cl(gco);
-    if (!closure || closure->isC || closure->l.p != scan->wanted) {
+    if (closure && !closure->isC && closure->l.p == scan->wanted) {
+        scan->found.push_back(closure);
+    }
+    return false;
+}
+
+// An inactive proto is exposed as a real Lua closure over a cloned proto. The
+// clone keeps the original metadata (name, source, line, arity, constants) but
+// its bytecode calls nil, so calling it can never execute the code the game has
+// not loaded. A C stub cannot report that metadata through debug.info, which is
+// exactly what scripts inspect on these proxies.
+bool push_proto_closure(lua_State* L, Proto* proto) {
+    if (!proto) {
         return false;
     }
 
-    push_gcobject(L, gco);
-    lua_rawseti(L, scan->result, ++scan->count);
-    return false;
+    Proto* cloned = clone_proto(L, proto);
+    if (!cloned) {
+        return false;
+    }
+
+    lua_rawcheckstack(L, 1);
+    luaC_threadbarrier(L);
+
+    const int upvalues = proto->nups > 0 ? proto->nups : 0;
+    Closure* closure = luaF_newLclosure(L, upvalues, L->gt, cloned);
+    if (!closure) {
+        return false;
+    }
+    setclvalue(L, L->top, closure);
+    incr_top(L);
+    g_own_closures.insert(closure);
+    return true;
 }
 
 int debug_getproto(lua_State* L) {
@@ -2921,7 +6451,10 @@ int debug_getproto(lua_State* L) {
     Closure* closure = lua_closure(L, fn, false);
     Proto* parent = closure->l.p;
     const int index = luaL_checkinteger(L, 2);
-    const bool activated = luaL_optboolean(L, 3, 0) != 0;
+    // Only a real boolean requests the active-closure table. Callers that pass
+    // some other value (an expected proto function, a truthy sentinel) still
+    // want the plain proto result.
+    const bool activated = lua_isboolean(L, 3) && lua_toboolean(L, 3);
 
     if (!parent || index < 1 || index > parent->sizep || !parent->p) {
         luaL_argerror(L, 2, "index out of range");
@@ -2932,28 +6465,35 @@ int debug_getproto(lua_State* L) {
         luaL_argerror(L, 2, "proto is unavailable");
     }
 
-    lua_newtable(L);
-    const int result = lua_gettop(L);
+    if (!activated) {
+        if (!push_proto_closure(L, wanted)) {
+            luaL_error(L, "failed to create proto closure");
+        }
+        lua_remove(L, fn);
+        return 1;
+    }
 
-    // Objects are only reachable from this frame while it runs; park the
-    // collector so the scan and any proto copies cannot be collected midway.
+    // Collect first, build the table after: allocating Lua objects while
+    // luaM_visitgco walks the GC pages can free or replace the page being
+    // iterated. The collector stays parked until every closure is anchored in
+    // the table, so raw Closure* collected from the pages cannot be swept
+    // before lua_rawseti stores them.
+    ProtoClosureScan scan{wanted, {}};
     const std::size_t threshold = L->global->GCthreshold;
     L->global->GCthreshold = SIZE_MAX;
+    luaM_visitgco(L, &scan, proto_closure_visitor);
 
-    if (activated) {
-        ProtoClosureScan scan{L, result, 0, wanted};
-        lua_rawcheckstack(L, 1);
-        luaC_threadbarrier(L);
-        luaM_visitgco(L, &scan, proto_closure_visitor);
-    } else {
-        Proto* clone = clone_proto(L, wanted);
-        if (!clone) {
-            L->global->GCthreshold = threshold;
-            luaL_error(L, "failed to clone proto");
-        }
-        LuaTable* env = closure->env ? closure->env : L->gt;
-        Closure* child = luaF_newLclosure(L, wanted->nups, env, clone);
-        push_closure(L, child);
+    lua_createtable(L, static_cast<int>(scan.found.size()), 0);
+    const int result = lua_gettop(L);
+    int count = 0;
+    for (Closure* found : scan.found) {
+        push_closure(L, found);
+        lua_rawseti(L, result, ++count);
+    }
+
+    // No live closure exists (an inactive proto): expose the nil-call proxy so
+    // the table still maps the proto to a callable that cannot run game code.
+    if (count == 0 && push_proto_closure(L, wanted)) {
         lua_rawseti(L, result, 1);
     }
 
@@ -2966,7 +6506,7 @@ int debug_getprotos(lua_State* L) {
     const int fn = push_function_arg(L, 1);
     Closure* closure = lua_closure(L, fn, false);
     Proto* parent = closure->l.p;
-    const bool activated = luaL_optboolean(L, 2, 0) != 0;
+    const bool activated = lua_isboolean(L, 2) && lua_toboolean(L, 2);
 
     if (!parent || parent->sizep <= 0 || !parent->p) {
         lua_newtable(L);
@@ -2974,25 +6514,32 @@ int debug_getprotos(lua_State* L) {
         return 1;
     }
 
-    const std::size_t threshold = L->global->GCthreshold;
-    L->global->GCthreshold = SIZE_MAX;
-
     lua_createtable(L, parent->sizep, 0);
     LuaTable* env = closure->env ? closure->env : L->gt;
     for (int i = 0; i < parent->sizep; ++i) {
         Proto* child = parent->p[i];
         if (!child) {
             lua_pushnil(L);
+        } else if (activated) {
+            const std::size_t threshold = L->global->GCthreshold;
+            L->global->GCthreshold = SIZE_MAX;
+            Proto* proto = clone_proto(L, child);
+            if (proto) {
+                Closure* child_closure =
+                    luaF_newLclosure(L, child->nups, env, proto);
+                push_closure(L, child_closure);
+            } else {
+                lua_pushnil(L);
+            }
+            L->global->GCthreshold = threshold;
         } else {
-            Proto* proto = activated ? child : clone_proto(L, child);
-            Closure* child_closure =
-                luaF_newLclosure(L, child->nups, env, proto ? proto : child);
-            push_closure(L, child_closure);
+            if (!push_proto_closure(L, child)) {
+                lua_pushnil(L);
+            }
         }
         lua_rawseti(L, -2, i + 1);
     }
 
-    L->global->GCthreshold = threshold;
     lua_remove(L, fn);
     return 1;
 }
@@ -3066,50 +6613,92 @@ int debug_getupvalue(lua_State* L) {
     return 1;
 }
 
+// Counts frames from the thread's own top frame. Level 0 is that top frame and
+// level 1 is its caller, exactly like the reference. Every frame is counted,
+// C frames included, except our hook trampoline, which scripts cannot see.
+CallInfo* frame_at(lua_State* target, int level) {
+    if (!target || level < 0) {
+        return nullptr;
+    }
+
+    for (CallInfo* frame = target->ci; frame >= target->base_ci; --frame) {
+        if (is_hook_plumbing_frame(frame)) {
+            continue;
+        }
+        if (level-- == 0) {
+            return frame;
+        }
+    }
+    return nullptr;
+}
+
+bool slot_in_thread_stack(lua_State* target, StkId slot) {
+    return slot >= target->stack && slot < target->stack + target->stacksize;
+}
+
 int debug_getstack(lua_State* L) {
     lua_State* target = L;
     int arg = 1;
     if (lua_isthread(L, 1)) {
         target = lua_tothread(L, 1);
-        if (!target || target->global != L->global) {
+        if (!target) {
             luaL_argerror(L, 1, "invalid thread");
         }
         arg = 2;
     }
 
     const int level = static_cast<int>(luaL_checkinteger(L, arg));
-    if (level <= 0) {
-        luaL_argerror(L, arg, "level must be positive");
-    }
-
-    CallInfo* frame = visible_level(target, level);
-    if (!frame || !frame->base) {
+    CallInfo* frame = frame_at(target, level);
+    if (!frame) {
+        if (env_trace()) {
+            zend::logf("env.getstack: level=%d out of range (foreign=%d)", level,
+                       target != L ? 1 : 0);
+        }
         luaL_argerror(L, arg, "level out of range");
     }
+    if (!frame->base) {
+        luaL_error(L, "callinfo base is null");
+    }
 
-    Closure* closure = clvalue(frame->func);
-    if (!closure || closure->isC) {
-        luaL_error(L, "cannot get stack of a C function");
+    // C frames (the yield boundary of a suspended coroutine, pcall, and so on)
+    // are snapshot-able too: their slots live in the same stack window, so a
+    // test that probes every level gets a table instead of an error.
+    Closure* closure = nullptr;
+    if (frame->func && ttisfunction(frame->func)) {
+        closure = clvalue(frame->func);
+    }
+    if (env_trace()) {
+        zend::logf("env.getstack: foreign=%d level=%d isC=%d slots=%d "
+                   "index=%s",
+                   target != L ? 1 : 0, level,
+                   closure && closure->isC ? 1 : 0,
+                   stack_frame_size(target, frame, closure),
+                   lua_isnumber(L, arg + 1) ? "yes" : "no");
     }
 
     const int size = stack_frame_size(target, frame, closure);
 
-    if (!lua_isnoneornil(L, arg + 1)) {
-        const int index = static_cast<int>(luaL_checkinteger(L, arg + 1)) - 1;
-        if (index < 0 || index >= size) {
+    if (lua_isnumber(L, arg + 1)) {
+        const int index = static_cast<int>(lua_tointeger(L, arg + 1)) - 1;
+        StkId slot = frame->base + index;
+        if (index < 0 || index >= size || !slot_in_thread_stack(target, slot)) {
             lua_pushnil(L);
             return 1;
         }
         luaC_threadbarrier(L);
-        luaA_pushvalue(L, frame->base + index);
+        luaA_pushvalue(L, slot);
         return 1;
     }
 
     lua_createtable(L, size, 0);
     lua_rawcheckstack(L, size > 0 ? size : 1);
     for (int i = 0; i < size; ++i) {
+        StkId slot = frame->base + i;
+        if (!slot_in_thread_stack(target, slot)) {
+            break;
+        }
         luaC_threadbarrier(L);
-        luaA_pushvalue(L, frame->base + i);
+        luaA_pushvalue(L, slot);
         lua_rawseti(L, -2, i + 1);
     }
     return 1;
@@ -3961,7 +7550,45 @@ int loadstring(lua_State* L) {
     const char* source = luaL_checklstring(L, 1, &length);
     const char* chunk_name = luaL_optstring(L, 2, "=zend-loadstring");
 
-    const std::string bytecode = compile(std::string(source, length));
+    const auto push_compile_error = [&](const std::string& message) {
+        std::string formatted;
+        if (chunk_name && (chunk_name[0] == '=' || chunk_name[0] == '@')) {
+            formatted.assign(chunk_name + 1);
+        } else {
+            formatted.assign("[string \"");
+            formatted.append(chunk_name ? chunk_name : "?");
+            formatted.append("\"]");
+        }
+        formatted.append(message);
+        lua_pushnil(L);
+        lua_pushlstring(L, formatted.data(), formatted.size());
+    };
+
+    // Luau bytecode is not source. Compiling it yields a parse error, and
+    // giving raw client bytecode to the VM loader would crash: the vendored VM
+    // only reads its own bytecode version and opcode numbering.
+    if (looks_like_client_bytecode(source, length)) {
+        push_compile_error(":1: bytecode is not source");
+        return 2;
+    }
+
+    std::string bytecode;
+    try {
+        bytecode = compile(std::string(source, length));
+    } catch (const std::exception& error) {
+        push_compile_error(std::string(":1: compile failed: ") + error.what());
+        return 2;
+    }
+
+    if (bytecode.empty() || bytecode[0] == '\0') {
+        // Luau::compile stores compile errors as version-0 bytecode prefixed by
+        // a NUL; the remainder already carries ":line: message".
+        push_compile_error(bytecode.size() > 1
+                               ? std::string(bytecode.c_str() + 1)
+                               : std::string(":1: compile error"));
+        return 2;
+    }
+
     if (luau_load(L, chunk_name, bytecode.data(), bytecode.size(), 0) != 0) {
         // luau_load leaves the compile error on the stack.
         lua_pushnil(L);
@@ -3972,7 +7599,110 @@ int loadstring(lua_State* L) {
     Closure* closure = clvalue(luaA_toobject(L, -1));
     if (closure && !closure->isC && closure->l.p) {
         executor::apply_capabilities(closure->l.p);
+        g_own_closures.insert(closure);
     }
+    return 1;
+}
+
+int loadfile(lua_State* L) {
+    wchar_t path[kWorkspacePathSize] = {};
+    resolve_path(L, 1, path, kWorkspacePathSize);
+
+    const DWORD attributes = GetFileAttributesW(path);
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "loadfile: '%s' does not exist", lua_tostring(L, 1));
+        return 2;
+    }
+
+    std::string source;
+    if (!read_file(path, source)) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "loadfile: cannot read '%s'", lua_tostring(L, 1));
+        return 2;
+    }
+
+    std::string bytecode;
+    try {
+        bytecode = compile(source);
+    } catch (const std::exception& error) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.what());
+        return 2;
+    }
+
+    const char* chunk_name = luaL_optstring(L, 2, "@loadfile");
+    if (luau_load(L, chunk_name, bytecode.data(), bytecode.size(), 0) != 0) {
+        const std::string message =
+            lua_isstring(L, -1) ? lua_tostring(L, -1) : "luau_load failed";
+        lua_pop(L, 1);
+        lua_pushnil(L);
+        lua_pushlstring(L, message.data(), message.size());
+        return 2;
+    }
+
+    Closure* closure = clvalue(luaA_toobject(L, -1));
+    if (closure && !closure->isC && closure->l.p) {
+        executor::apply_capabilities(closure->l.p);
+        g_own_closures.insert(closure);
+    }
+    return 1;
+}
+
+int getcustomasset(lua_State* L) {
+    wchar_t source[kWorkspacePathSize] = {};
+    resolve_path(L, 1, source, kWorkspacePathSize);
+
+    const DWORD attributes = GetFileAttributesW(source);
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        luaL_error(L, "getcustomasset: file does not exist");
+    }
+
+    wchar_t executable[MAX_PATH] = {};
+    if (GetModuleFileNameW(GetModuleHandleW(nullptr), executable, MAX_PATH) == 0) {
+        luaL_error(L, "getcustomasset: could not locate the client");
+    }
+    wchar_t* last_slash = std::wcsrchr(executable, L'\\');
+    if (!last_slash) {
+        luaL_error(L, "getcustomasset: could not locate the client");
+    }
+    last_slash[1] = L'\0';
+
+    wchar_t directory[1024] = {};
+    if (swprintf_s(directory, L"%sExtraContent\\zen", executable) < 0) {
+        luaL_error(L, "getcustomasset: asset path is too long");
+    }
+    if (!ensure_directory(directory)) {
+        luaL_error(L, "getcustomasset: could not create the asset folder");
+    }
+
+    const wchar_t* file_name = std::wcsrchr(source, L'\\');
+    file_name = file_name ? file_name + 1 : source;
+
+    wchar_t destination[1024] = {};
+    if (swprintf_s(destination, L"%s\\%s", directory, file_name) < 0) {
+        luaL_error(L, "getcustomasset: asset path is too long");
+    }
+    if (!CopyFileW(source, destination, FALSE)) {
+        luaL_error(L, "getcustomasset: could not copy the asset");
+    }
+
+    const int needed =
+        WideCharToMultiByte(CP_UTF8, 0, file_name, -1, nullptr, 0, nullptr,
+                            nullptr);
+    if (needed <= 1) {
+        luaL_error(L, "getcustomasset: invalid file name");
+    }
+
+    std::string utf8(static_cast<std::size_t>(needed), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, file_name, -1, utf8.data(), needed,
+                        nullptr, nullptr);
+    utf8.resize(static_cast<std::size_t>(needed - 1));
+
+    const std::string url = "rbxasset://zen/" + utf8;
+    lua_pushlstring(L, url.data(), url.size());
     return 1;
 }
 
@@ -4021,6 +7751,185 @@ void install_filesystem(lua_State* L) {
     set_function(L, "makefolder", fs_makefolder);
     set_function(L, "delfile", fs_delfile);
     set_function(L, "delfolder", fs_delfolder);
+    set_function(L, "loadfile", loadfile);
+    set_function(L, "getcustomasset", getcustomasset);
+}
+
+// --- LZ4 block codec ------------------------------------------------------
+//
+// The wire format is the raw LZ4 block format (token nibbles, 16-bit
+// little-endian offsets), which is what every executor exposes here.
+
+void lz4_write_length(std::vector<std::uint8_t>& out, std::size_t length) {
+    while (length >= 255) {
+        out.push_back(255);
+        length -= 255;
+    }
+    out.push_back(static_cast<std::uint8_t>(length));
+}
+
+std::string lz4_compress_block(const std::uint8_t* source, std::size_t size) {
+    constexpr std::size_t kHashSize = 1u << 16;
+    std::vector<int> table(kHashSize, -1);
+
+    std::vector<std::uint8_t> out;
+    out.reserve(size + size / 8 + 16);
+
+    auto read32 = [source](std::size_t pos) -> std::uint32_t {
+        return static_cast<std::uint32_t>(source[pos]) |
+               (static_cast<std::uint32_t>(source[pos + 1]) << 8) |
+               (static_cast<std::uint32_t>(source[pos + 2]) << 16) |
+               (static_cast<std::uint32_t>(source[pos + 3]) << 24);
+    };
+
+    std::size_t anchor = 0;
+    std::size_t i = 0;
+    while (i + 4 <= size) {
+        const std::uint32_t sequence = read32(i);
+        const std::size_t slot = (sequence * 2654435761u) >> 16;
+        const int previous = table[slot];
+        table[slot] = static_cast<int>(i);
+
+        if (previous < 0) {
+            ++i;
+            continue;
+        }
+
+        const std::size_t match = static_cast<std::size_t>(previous);
+        if (i <= match || i - match > 0xFFFF || match + 4 > size ||
+            read32(match) != sequence) {
+            ++i;
+            continue;
+        }
+
+        std::size_t length = 4;
+        while (i + length < size && match + length < size &&
+               source[i + length] == source[match + length]) {
+            ++length;
+        }
+
+        const std::size_t literal = i - anchor;
+        const std::uint8_t token = static_cast<std::uint8_t>(
+            ((std::min)(literal, std::size_t{15}) << 4) |
+            (std::min)(length - 4, std::size_t{15}));
+        out.push_back(token);
+        if (literal >= 15) {
+            lz4_write_length(out, literal - 15);
+        }
+        out.insert(out.end(), source + anchor, source + i);
+
+        const std::uint16_t offset = static_cast<std::uint16_t>(i - match);
+        out.push_back(static_cast<std::uint8_t>(offset & 0xFF));
+        out.push_back(static_cast<std::uint8_t>((offset >> 8) & 0xFF));
+        if (length - 4 >= 15) {
+            lz4_write_length(out, length - 4 - 15);
+        }
+
+        i += length;
+        anchor = i;
+    }
+
+    if (anchor < size) {
+        const std::size_t literal = size - anchor;
+        out.push_back(static_cast<std::uint8_t>(
+            (std::min)(literal, std::size_t{15}) << 4));
+        if (literal >= 15) {
+            lz4_write_length(out, literal - 15);
+        }
+        out.insert(out.end(), source + anchor, source + size);
+    }
+
+    return std::string(reinterpret_cast<const char*>(out.data()), out.size());
+}
+
+bool lz4_read_length(const std::uint8_t* input, std::size_t size,
+                     std::size_t& position, std::size_t& length) {
+    std::size_t extra = 0;
+    while (true) {
+        if (position >= size) {
+            return false;
+        }
+        const std::uint8_t byte = input[position++];
+        extra += byte;
+        if (byte != 255) {
+            break;
+        }
+    }
+    length += extra;
+    return true;
+}
+
+bool lz4_decompress_block(const std::uint8_t* input, std::size_t size,
+                          std::string& out) {
+    std::vector<std::uint8_t> buffer;
+    buffer.reserve(size * 3);
+
+    std::size_t position = 0;
+    while (position < size) {
+        const std::uint8_t token = input[position++];
+        std::size_t literals = token >> 4;
+        std::size_t matches = token & 0x0F;
+
+        if (literals == 15 &&
+            !lz4_read_length(input, size, position, literals)) {
+            return false;
+        }
+        if (position + literals > size) {
+            return false;
+        }
+        buffer.insert(buffer.end(), input + position, input + position + literals);
+        position += literals;
+
+        if (position >= size) {
+            break;
+        }
+        if (position + 2 > size) {
+            return false;
+        }
+
+        const std::uint16_t offset =
+            static_cast<std::uint16_t>(input[position]) |
+            (static_cast<std::uint16_t>(input[position + 1]) << 8);
+        position += 2;
+        if (offset == 0 || offset > buffer.size()) {
+            return false;
+        }
+
+        matches += 4;
+        if ((token & 0x0F) == 15 &&
+            !lz4_read_length(input, size, position, matches)) {
+            return false;
+        }
+
+        const std::size_t start = buffer.size() - offset;
+        for (std::size_t index = 0; index < matches; ++index) {
+            buffer.push_back(buffer[start + index]);
+        }
+    }
+
+    out.assign(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+    return true;
+}
+
+int lz4compress(lua_State* L) {
+    std::size_t length = 0;
+    const char* data = luaL_checklstring(L, 1, &length);
+    const std::string out = lz4_compress_block(
+        reinterpret_cast<const std::uint8_t*>(data), length);
+    lua_pushlstring(L, out.data(), out.size());
+    return 1;
+}
+
+int lz4decompress(lua_State* L) {
+    std::size_t length = 0;
+    const char* data = luaL_checklstring(L, 1, &length);
+    std::string out;
+    if (!lz4_decompress_block(reinterpret_cast<const std::uint8_t*>(data),
+                              length, out)) {
+        luaL_error(L, "invalid lz4 data");
+    }
+    lua_pushlstring(L, out.data(), out.size());
+    return 1;
 }
 
 void install_crypt(lua_State* L) {
@@ -4028,6 +7937,8 @@ void install_crypt(lua_State* L) {
     set_function(L, "base64decode", crypt_base64decode);
     set_function(L, "base64_encode", crypt_base64encode);
     set_function(L, "base64_decode", crypt_base64decode);
+    set_function(L, "lz4compress", lz4compress);
+    set_function(L, "lz4decompress", lz4decompress);
 
     lua_newtable(L);
     set_field_function(L, "encode", crypt_base64encode);
@@ -4789,6 +8700,558 @@ void install_http(lua_State* L) {
     install_instance_http(L);
 }
 
+// --- WebSocket ------------------------------------------------------------
+//
+// WinHTTP owns the transport. A detached worker performs the upgrade and the
+// blocking receive loop; it only touches C++ state. Lua never runs off the
+// client thread: the prelude polls the receive queue from a task.wait loop and
+// fires OnMessage/OnClose there. Sends are serialized with the worker through
+// send_mutex because WinHTTP allows one send and one receive at a time.
+
+struct WebSocketSocket {
+    HINTERNET session = nullptr;
+    HINTERNET connection = nullptr;
+    HINTERNET socket = nullptr;
+
+    std::mutex send_mutex;
+    std::mutex queue_mutex;
+    std::deque<std::string> outbox;
+    std::deque<std::string> inbox;
+
+    std::atomic<bool> connected{false};
+    std::atomic<bool> closing{false};
+    std::atomic<bool> closed{false};
+    bool close_reported = false;
+};
+
+std::mutex g_ws_mutex;
+std::unordered_map<int, std::shared_ptr<WebSocketSocket>> g_ws_sockets;
+int g_ws_next_id = 1;
+
+std::string websocket_hex_preview(const char* data, std::size_t size);
+
+bool websocket_is_utf8(const char* text, std::size_t size) {
+    const auto* bytes = reinterpret_cast<const unsigned char*>(text);
+    for (std::size_t index = 0; index < size;) {
+        const unsigned char lead = bytes[index];
+        std::size_t extra = 0;
+        unsigned int codepoint = 0;
+
+        if (lead < 0x80) {
+            ++index;
+            continue;
+        } else if ((lead & 0xE0) == 0xC0) {
+            extra = 1;
+            codepoint = lead & 0x1F;
+        } else if ((lead & 0xF0) == 0xE0) {
+            extra = 2;
+            codepoint = lead & 0x0F;
+        } else if ((lead & 0xF8) == 0xF0) {
+            extra = 3;
+            codepoint = lead & 0x07;
+        } else {
+            return false;
+        }
+
+        if (index + extra >= size) {
+            return false;
+        }
+        for (std::size_t byte = 1; byte <= extra; ++byte) {
+            const unsigned char next = bytes[index + byte];
+            if ((next & 0xC0) != 0x80) {
+                return false;
+            }
+            codepoint = (codepoint << 6) | (next & 0x3F);
+        }
+
+        if ((extra == 1 && codepoint < 0x80) ||
+            (extra == 2 && codepoint < 0x800) ||
+            (extra == 3 && codepoint < 0x10000) ||
+            codepoint > 0x10FFFF ||
+            (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
+            return false;
+        }
+        index += extra + 1;
+    }
+    return true;
+}
+
+bool websocket_handshake(WebSocketSocket& socket, const std::wstring& host,
+                         const std::wstring& path, INTERNET_PORT port,
+                         bool secure) {
+    HINTERNET session =
+        WinHttpOpen(L"Mozilla/5.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) {
+        return false;
+    }
+    WinHttpSetTimeouts(session, 10000, 10000, 15000, 15000);
+
+    HINTERNET connection =
+        WinHttpConnect(session, host.c_str(), port, 0);
+    if (!connection) {
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    HINTERNET request = WinHttpOpenRequest(
+        connection, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0);
+    if (!request) {
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    HINTERNET websocket = nullptr;
+    if (WinHttpSetOption(request, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET,
+                         nullptr, 0) &&
+        WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                           WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(request, nullptr)) {
+        websocket = WinHttpWebSocketCompleteUpgrade(request, 0);
+    }
+    WinHttpCloseHandle(request);
+
+    if (!websocket) {
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(socket.send_mutex);
+    socket.session = session;
+    socket.connection = connection;
+    socket.socket = websocket;
+    socket.connected.store(true, std::memory_order_release);
+
+    while (!socket.outbox.empty() && !socket.closing.load(std::memory_order_acquire)) {
+        const std::string& message = socket.outbox.front();
+        const bool text = websocket_is_utf8(message.data(), message.size());
+        WinHttpWebSocketSend(
+            websocket,
+            text ? WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE
+                 : WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE,
+            const_cast<char*>(message.data()),
+            static_cast<DWORD>(message.size()));
+        socket.outbox.pop_front();
+    }
+    return true;
+}
+
+void websocket_worker(std::shared_ptr<WebSocketSocket> socket,
+                      std::wstring host, std::wstring path, INTERNET_PORT port,
+                      bool secure) {
+    if (!websocket_handshake(*socket, host, path, port, secure)) {
+        std::lock_guard<std::mutex> lock(socket->queue_mutex);
+        socket->closed.store(true, std::memory_order_release);
+        return;
+    }
+
+    std::string partial;
+    char buffer[8192];
+
+    while (!socket->closing.load(std::memory_order_acquire)) {
+        DWORD received = 0;
+        WINHTTP_WEB_SOCKET_BUFFER_TYPE type = WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE;
+
+        const DWORD status = WinHttpWebSocketReceive(
+            socket->socket, buffer, sizeof(buffer), &received, &type);
+        if (status == ERROR_WINHTTP_TIMEOUT) {
+            continue;
+        }
+        if (status != NO_ERROR ||
+            type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) {
+            if (env_trace()) {
+                zend::logf("env.websocket.worker: recv status=%lu type=%d "
+                           "bytes=%lu",
+                           static_cast<unsigned long>(status),
+                           static_cast<int>(type),
+                           static_cast<unsigned long>(received));
+            }
+            break;
+        }
+        if (env_trace()) {
+            zend::logf("env.websocket.worker: recv type=%d bytes=%lu hex=%s",
+                       static_cast<int>(type),
+                       static_cast<unsigned long>(received),
+                       websocket_hex_preview(buffer, received).c_str());
+        }
+
+        partial.append(buffer, received);
+        if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE ||
+            type == WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE) {
+            std::lock_guard<std::mutex> lock(socket->queue_mutex);
+            if (socket->inbox.size() < 4096) {
+                socket->inbox.push_back(std::move(partial));
+            }
+            partial.clear();
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(socket->send_mutex);
+        if (socket->socket) {
+            WinHttpWebSocketClose(socket->socket,
+                                  WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr,
+                                  0);
+            WinHttpCloseHandle(socket->socket);
+            socket->socket = nullptr;
+        }
+        if (socket->connection) {
+            WinHttpCloseHandle(socket->connection);
+            socket->connection = nullptr;
+        }
+        if (socket->session) {
+            WinHttpCloseHandle(socket->session);
+            socket->session = nullptr;
+        }
+    }
+
+    socket->closed.store(true, std::memory_order_release);
+}
+
+std::shared_ptr<WebSocketSocket> find_websocket(int id) {
+    std::lock_guard<std::mutex> lock(g_ws_mutex);
+    const auto entry = g_ws_sockets.find(id);
+    return entry == g_ws_sockets.end() ? nullptr : entry->second;
+}
+
+std::string websocket_hex_preview(const char* data, std::size_t size) {
+    static const char* const digits = "0123456789abcdef";
+    const std::size_t limit = size < 48 ? size : 48;
+    std::string out;
+    out.reserve(limit * 2);
+    for (std::size_t index = 0; index < limit; ++index) {
+        const auto byte = static_cast<unsigned char>(data[index]);
+        out.push_back(digits[byte >> 4]);
+        out.push_back(digits[byte & 0x0F]);
+    }
+    return out;
+}
+
+int websocket_connect(lua_State* L) {
+    const char* url = luaL_checkstring(L, 1);
+
+    std::string address(url);
+    bool secure = false;
+    if (address.rfind("wss://", 0) == 0) {
+        secure = true;
+        address.replace(0, 6, "https://");
+    } else if (address.rfind("ws://", 0) == 0) {
+        address.replace(0, 5, "http://");
+    } else if (address.rfind("https://", 0) == 0) {
+        secure = true;
+    } else if (address.rfind("http://", 0) != 0) {
+        luaL_error(L, "WebSocket: invalid url '%s'", url);
+    }
+
+    URL_COMPONENTS components{};
+    components.dwStructSize = sizeof(components);
+    components.dwSchemeLength = static_cast<DWORD>(-1);
+    components.dwHostNameLength = static_cast<DWORD>(-1);
+    components.dwUrlPathLength = static_cast<DWORD>(-1);
+    components.dwExtraInfoLength = static_cast<DWORD>(-1);
+
+    const std::wstring wide_address = widen_utf8(address);
+    if (wide_address.empty() ||
+        !WinHttpCrackUrl(wide_address.c_str(), 0, 0, &components)) {
+        luaL_error(L, "WebSocket: malformed url '%s'", url);
+    }
+
+    std::wstring host(components.lpszHostName, components.dwHostNameLength);
+    std::wstring path(components.lpszUrlPath, components.dwUrlPathLength);
+    if (components.dwExtraInfoLength) {
+        path.append(components.lpszExtraInfo, components.dwExtraInfoLength);
+    }
+    if (path.empty()) {
+        path = L"/";
+    }
+    if (components.nPort == 443) {
+        secure = true;
+    }
+
+    auto socket = std::make_shared<WebSocketSocket>();
+    int id = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_ws_mutex);
+        id = g_ws_next_id++;
+        g_ws_sockets[id] = socket;
+    }
+
+    std::thread(websocket_worker, socket, host, path,
+                static_cast<INTERNET_PORT>(components.nPort), secure)
+        .detach();
+
+    lua_pushinteger(L, id);
+    return 1;
+}
+
+int websocket_send(lua_State* L) {
+    const int id = static_cast<int>(luaL_checkinteger(L, 1));
+    std::size_t length = 0;
+    const char* message = luaL_checklstring(L, 2, &length);
+    const bool binary = !lua_isnoneornil(L, 3) && lua_toboolean(L, 3) != 0;
+
+    const auto socket = find_websocket(id);
+    if (!socket || socket->closed.load(std::memory_order_acquire)) {
+        luaL_error(L, "WebSocket is closed");
+    }
+
+    const bool text = !binary && websocket_is_utf8(message, length);
+    if (env_trace()) {
+        zend::logf("env.websocket.send: id=%d bytes=%zu text=%d hex=%s", id,
+                   length, text ? 1 : 0,
+                   websocket_hex_preview(message, length).c_str());
+    }
+
+    std::lock_guard<std::mutex> lock(socket->send_mutex);
+    if (!socket->connected.load(std::memory_order_acquire)) {
+        if (socket->outbox.size() < 256) {
+            socket->outbox.emplace_back(message, length);
+        }
+        return 0;
+    }
+    if (!socket->socket) {
+        luaL_error(L, "WebSocket is closed");
+    }
+
+    const DWORD status = WinHttpWebSocketSend(
+        socket->socket,
+        text ? WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE
+             : WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE,
+        const_cast<char*>(message), static_cast<DWORD>(length));
+    if (status != NO_ERROR) {
+        luaL_error(L, "WebSocket send failed (%d)", static_cast<int>(status));
+    }
+    return 0;
+}
+
+int websocket_close(lua_State* L) {
+    const int id = static_cast<int>(luaL_checkinteger(L, 1));
+    const auto socket = find_websocket(id);
+    if (!socket) {
+        return 0;
+    }
+
+    socket->closing.store(true, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(socket->send_mutex);
+    if (socket->socket && socket->connected.load(std::memory_order_acquire)) {
+        WinHttpWebSocketShutdown(socket->socket,
+                                 WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,
+                                 nullptr, 0);
+    }
+    return 0;
+}
+
+int websocket_poll(lua_State* L) {
+    const int id = static_cast<int>(luaL_checkinteger(L, 1));
+    const auto socket = find_websocket(id);
+
+    lua_newtable(L);
+    if (!socket) {
+        lua_pushboolean(L, 1);
+        return 2;
+    }
+
+    std::deque<std::string> messages;
+    bool closed = false;
+    {
+        std::lock_guard<std::mutex> lock(socket->queue_mutex);
+        messages.swap(socket->inbox);
+        if (socket->closed.load(std::memory_order_acquire) &&
+            !socket->close_reported) {
+            socket->close_reported = true;
+            closed = true;
+        }
+    }
+
+    int index = 1;
+    for (const std::string& message : messages) {
+        if (env_trace()) {
+            zend::logf("env.websocket.poll: bytes=%zu hex=%s", message.size(),
+                       websocket_hex_preview(message.data(), message.size())
+                           .c_str());
+        }
+        lua_pushlstring(L, message.data(), message.size());
+        lua_rawseti(L, -2, index++);
+    }
+
+    if (env_trace() && closed) {
+        zend::logf("env.websocket.poll: closed");
+    }
+
+    lua_pushboolean(L, closed ? 1 : 0);
+    return 2;
+}
+
+int websocket_release(lua_State* L) {
+    const int id = static_cast<int>(luaL_checkinteger(L, 1));
+    std::lock_guard<std::mutex> lock(g_ws_mutex);
+    g_ws_sockets.erase(id);
+    return 0;
+}
+
+const char* const kWebSocketPrelude = R"LUA(
+local Signal = {}
+Signal.__index = Signal
+
+function Signal.new()
+    return setmetatable({ _handlers = {} }, Signal)
+end
+
+function Signal:Connect(handler)
+    if type(handler) ~= "function" then
+        error("handler must be a function", 2)
+    end
+
+    local connection = { _signal = self, _handler = handler, _dead = false }
+
+    function connection:Disconnect()
+        if self._dead then
+            return
+        end
+        self._dead = true
+        local handlers = self._signal._handlers
+        for index = 1, #handlers do
+            if handlers[index] == self then
+                table.remove(handlers, index)
+                break
+            end
+        end
+    end
+
+    connection.disconnect = connection.Disconnect
+    connection.Destroy = connection.Disconnect
+    table.insert(self._handlers, connection)
+    return connection
+end
+Signal.connect = Signal.Connect
+
+function Signal:Once(handler)
+    local connection
+    connection = self:Connect(function(...)
+        connection:Disconnect()
+        handler(...)
+    end)
+    return connection
+end
+Signal.once = Signal.Once
+
+function Signal:Fire(...)
+    local snapshot = {}
+    for index, connection in ipairs(self._handlers) do
+        snapshot[index] = connection
+    end
+    for _, connection in ipairs(snapshot) do
+        if not connection._dead then
+            task.spawn(connection._handler, ...)
+        end
+    end
+end
+
+function Signal:Wait()
+    local thread = coroutine.running()
+    local fired = false
+    self:Once(function(...)
+        if fired then
+            return
+        end
+        fired = true
+        task.spawn(thread, ...)
+    end)
+    return coroutine.yield()
+end
+Signal.wait = Signal.Wait
+
+local WebSocket = {}
+WebSocket.__index = WebSocket
+
+function WebSocket.connect(url)
+    if type(url) ~= "string" then
+        error("WebSocket.connect expects a string url", 2)
+    end
+
+    local id = __zend_ws_connect(url)
+    local self = setmetatable({
+        _id = id,
+        _closed = false,
+        OnMessage = Signal.new(),
+        OnClose = Signal.new(),
+    }, WebSocket)
+
+    task.spawn(function()
+        while not self._closed do
+            local messages, closed = __zend_ws_poll(self._id)
+            for index = 1, #messages do
+                self.OnMessage:Fire(messages[index])
+            end
+            if closed then
+                self._closed = true
+                __zend_ws_release(self._id)
+                self.OnClose:Fire()
+                break
+            end
+            task.wait(0.03)
+        end
+    end)
+
+    return self
+end
+
+function WebSocket:Send(message, binary)
+    if self._closed then
+        error("WebSocket is closed", 2)
+    end
+    if type(message) ~= "string" then
+        message = tostring(message)
+    end
+    __zend_ws_send(self._id, message, binary == true)
+end
+
+function WebSocket:Close()
+    if self._closed then
+        return
+    end
+    __zend_ws_close(self._id)
+end
+WebSocket.send = WebSocket.Send
+WebSocket.close = WebSocket.Close
+
+return WebSocket
+)LUA";
+
+void install_websocket(lua_State* L) {
+    set_function(L, "__zend_ws_connect", websocket_connect);
+    set_function(L, "__zend_ws_send", websocket_send);
+    set_function(L, "__zend_ws_close", websocket_close);
+    set_function(L, "__zend_ws_poll", websocket_poll);
+    set_function(L, "__zend_ws_release", websocket_release);
+
+    const std::string bytecode = compile(kWebSocketPrelude);
+    if (luau_load(L, "=zend-websocket", bytecode.data(), bytecode.size(), 0) !=
+        0) {
+        lua_pop(L, 1);
+        return;
+    }
+    Closure* closure = clvalue(luaA_toobject(L, -1));
+    if (closure && !closure->isC && closure->l.p) {
+        executor::apply_capabilities(closure->l.p);
+    }
+
+    // The prelude keeps its table in a local (the name would otherwise shadow
+    // the global), so it returns the table and the C side publishes it.
+    if (lua_pcall(L, 0, 1, 0) != 0) {
+        lua_pop(L, 1);
+        return;
+    }
+    if (lua_istable(L, -1)) {
+        lua_setfield(L, LUA_GLOBALSINDEX, "WebSocket");
+        return;
+    }
+    lua_pop(L, 1);
+}
+
 // --- rconsole -------------------------------------------------------------
 
 std::mutex g_console_mutex;
@@ -5019,6 +9482,8 @@ void install_signals(lua_State* L) {
     set_function(L, "is_signal_hooked", issignalhooked);
     set_function(L, "firetouchinterest", firetouchinterest);
     set_function(L, "fireproximityprompt", fireproximityprompt);
+    set_function(L, "fireclickdetector", fireclickdetector);
+    set_function(L, "replicatesignal", replicatesignal);
 }
 
 } // namespace
@@ -5143,6 +9608,8 @@ void install(lua_State* L) {
     lua_replace(L, LUA_GLOBALSINDEX);
 
     set_function(L, "identifyexecutor", identifyexecutor);
+    set_function(L, "__zend_env_trace", set_env_trace);
+    set_function(L, "__zend_opmap", dump_opcode_map);
     set_function(L, "getgenv", getgenv);
     set_function(L, "getrenv", getrenv);
     set_function(L, "getreg", getreg);
@@ -5152,6 +9619,13 @@ void install(lua_State* L) {
     set_function(L, "getscripts", getscripts);
     set_function(L, "getcallingscript", getcallingscript);
     set_function(L, "getloadedmodules", getloadedmodules);
+    set_function(L, "getscriptbytecode", getscriptbytecode);
+    set_function(L, "getscripthash", getscripthash);
+    set_function(L, "getscriptclosure", getscriptclosure);
+    set_function(L, "getrunningscripts", getrunningscripts);
+    set_function(L, "getscriptfromthread", getscriptfromthread);
+    set_function(L, "getsenv", getsenv);
+    set_function(L, "decompile", decompile);
     set_function(L, "loadstring", loadstring);
 
     set_function(L, "getthreadidentity", getthreadidentity);
@@ -5162,6 +9636,25 @@ void install(lua_State* L) {
     set_function(L, "setthreadcontext", setthreadidentity);
     set_function(L, "getcapabilities", getcapabilities);
     set_function(L, "getnamecallmethod", getnamecallmethod);
+
+    set_function(L, "gethui", gethui);
+    set_function(L, "cloneref", cloneref);
+    set_function(L, "compareinstances", compareinstances);
+    set_function(L, "isexecutorclosure", isexecutorclosure);
+    set_function(L, "getfunctionhash", getfunctionhash);
+    set_function(L, "filtergc", filtergc);
+    set_function(L, "gethiddenproperty", gethiddenproperty);
+    set_function(L, "sethiddenproperty", sethiddenproperty);
+    set_function(L, "isscriptable", isscriptable);
+    set_function(L, "setscriptable", setscriptable);
+    set_function(L, "getcallbackvalue", getcallbackvalue);
+
+    lua_newtable(L);
+    set_field_function(L, "invalidate", cache_invalidate);
+    set_field_function(L, "iscached", cache_iscached);
+    set_field_function(L, "replace", cache_replace);
+    lua_setreadonly(L, -1, 1);
+    lua_setglobal(L, "cache");
 
     set_function(L, "getchildren", instance_getchildren);
     set_function(L, "getdescendants", instance_getdescendants);
@@ -5188,6 +9681,7 @@ void install(lua_State* L) {
     // Runs last: the prelude defines HttpGet/HttpPost and then their DataModel
     // bindings are added to the shared instance metatable.
     install_http(L);
+    install_websocket(L);
 
     set_function(L, "iscclosure", iscclosure);
     set_function(L, "islclosure", islclosure);
@@ -5205,6 +9699,7 @@ void install(lua_State* L) {
     set_function(L, "isfunctionhooked", isfunctionhooked);
 
     set_function(L, "getinfo", debug_getinfo);
+    set_function(L, "getlocal", debug_getlocal);
     set_function(L, "getconstants", debug_getconstants);
     set_function(L, "getconstant", debug_getconstant);
     set_function(L, "setconstant", debug_setconstant);
@@ -5217,6 +9712,7 @@ void install(lua_State* L) {
     set_function(L, "setstack", debug_setstack);
 
     mirror_debug(L, "getinfo");
+    mirror_debug(L, "getlocal");
     mirror_debug(L, "getconstants");
     mirror_debug(L, "getconstant");
     mirror_debug(L, "setconstant");
@@ -5230,15 +9726,22 @@ void install(lua_State* L) {
 
     drawing::install(L, set_function);
 
-    // getgenv()._G is getgenv() itself, matching stock Luau where _G names the
-    // active global table. `shared` is one table for the whole VM.
-    lua_pushvalue(L, LUA_GLOBALSINDEX);
-    lua_setfield(L, LUA_GLOBALSINDEX, "_G");
-
-    lua_newtable(L);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, LUA_GLOBALSINDEX, "shared");
-    lua_pop(L, 1);
+    // `_G` and `shared` are VM-wide tables in Roblox: every script in the
+    // DataModel, game or executor, reads and writes the same objects. Prefer
+    // the client globals' own entries; the registry slots are the fallback for
+    // VMs that do not publish them, and a fresh table only covers a VM where
+    // neither exists yet.
+    for (int slot : {2, 4}) {
+        const char* name = slot == 2 ? "_G" : "shared";
+        if (!push_client_global_table(L, name, slot)) {
+            lua_newtable(L);
+            lua_pushvalue(L, -1);
+            lua_rawseti(L, LUA_REGISTRYINDEX, slot);
+        }
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_GLOBALSINDEX, name);
+        lua_pop(L, 1);
+    }
 
     // Put the per-chunk proxy back. The shared table remains anchored by the
     // registry ref and, from now on, by the proxy metatable's __index.
@@ -5262,10 +9765,32 @@ void reset() {
     g_namecall_frames.clear();
     g_signal_hooks.clear();
     g_hooked_connection_functions.clear();
+    g_property_layout = PropertyLayout{};
+    g_pristine_scriptable.clear();
+    g_scriptable_overrides.clear();
     drawing::reset();
     {
         std::lock_guard<std::mutex> lock(g_http_mutex);
         g_http_jobs.clear();
+    }
+    {
+        std::vector<std::shared_ptr<WebSocketSocket>> sockets;
+        {
+            std::lock_guard<std::mutex> lock(g_ws_mutex);
+            for (auto& entry : g_ws_sockets) {
+                sockets.push_back(entry.second);
+            }
+            g_ws_sockets.clear();
+        }
+        for (const auto& socket : sockets) {
+            socket->closing.store(true, std::memory_order_release);
+            std::lock_guard<std::mutex> lock(socket->send_mutex);
+            if (socket->socket) {
+                WinHttpWebSocketShutdown(
+                    socket->socket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,
+                    nullptr, 0);
+            }
+        }
     }
 }
 

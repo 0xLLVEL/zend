@@ -56,6 +56,10 @@ lua_State* thread();
 // accepts calls made from the compiled chunk.
 void apply_capabilities(Proto* proto);
 
+// True when this proto was compiled by the executor (its capability tag is
+// ours). Used by isexecutorclosure.
+bool owns_proto(const Proto* proto);
+
 // Installs or clears the live output sink. The executor copies the function
 // and context under its lock; pass null to disable streaming.
 void set_output_sink(OutputFn sink, void* context);

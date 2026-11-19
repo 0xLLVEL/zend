@@ -4426,6 +4426,50 @@ bool push_binary_string_field(lua_State* L, int index, std::uintptr_t instance,
                 }
             }
 
+            // Trace-only probe: look for other SharedString-shaped holders in
+            // the object so the real AeroMeshData slot can be identified
+            // empirically instead of guessing offsets.
+            if (env_trace()) {
+                for (std::uintptr_t offset = 0x200; offset <= 0x500;
+                     offset += 8) {
+                    std::uintptr_t holder = 0;
+                    if (!read_ptr(instance + offset, holder) ||
+                        !is_user_ptr(holder)) {
+                        continue;
+                    }
+                    for (const std::uintptr_t inner :
+                         {0x0, 0x8, 0x10, 0x18, 0x20, 0x28}) {
+                        std::uint64_t length = 0;
+                        std::uint64_t capacity = 0;
+                        if (!read(holder + inner + 0x10, length) ||
+                            !read(holder + inner + 0x18, capacity) ||
+                            length == 0 || length > (1u << 20) ||
+                            capacity < length || capacity > (4u << 20)) {
+                            continue;
+                        }
+                        std::string candidate;
+                        if (!read_msvc_string(holder + inner, candidate) ||
+                            candidate.empty()) {
+                            continue;
+                        }
+                        const auto* bytes =
+                            reinterpret_cast<const unsigned char*>(
+                                candidate.data());
+                        const unsigned b0 = candidate.size() > 0 ? bytes[0] : 0;
+                        const unsigned b1 = candidate.size() > 1 ? bytes[1] : 0;
+                        const unsigned b2 = candidate.size() > 2 ? bytes[2] : 0;
+                        const unsigned b3 = candidate.size() > 3 ? bytes[3] : 0;
+                        zend::logf("env.aero_scan: off=0x%X inner=0x%X "
+                                   "len=%zu cap=%llu head=%02X%02X%02X%02X",
+                                   static_cast<unsigned>(offset),
+                                   static_cast<unsigned>(inner),
+                                   candidate.size(),
+                                   static_cast<unsigned long long>(capacity),
+                                   b0, b1, b2, b3);
+                    }
+                }
+            }
+
             // A union with no generated mesh exposes an empty SharedString; the
             // field exists, so return the empty string instead of nil.
             if (!ok && saw_field) {
@@ -4619,10 +4663,14 @@ int sethiddenproperty(lua_State* L) {
     int original_type = -1;
     find_property_type(property, type_address, original_type);
     if (env_trace()) {
+        std::size_t value_length = 0;
+        if (lua_type(L, 3) == LUA_TSTRING) {
+            lua_tolstring(L, 3, &value_length);
+        }
         zend::logf("env.sethiddenproperty: class=%s prop=%s type=%d hidden=%d "
-                   "value=%s",
+                   "value=%s len=%zu",
                    instance_class_name(L, 1).c_str(), name, original_type,
-                   hidden ? 1 : 0, luaL_typename(L, 3));
+                   hidden ? 1 : 0, luaL_typename(L, 3), value_length);
     }
     if (original_type == kTypeSharedString && std::strcmp(name, "Tags") == 0) {
         std::size_t length = 0;
